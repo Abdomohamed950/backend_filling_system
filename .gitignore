@@ -1,0 +1,9 @@
+node_modules/
+.env
+.dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+*.jwt_secret
+npm-debug.log*
