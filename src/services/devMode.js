@@ -25,14 +25,14 @@
  *   dev_move        { port, turns }  حركة يدوية للمعايرة
  *   dev_capture_plate               تشغيل قراءة الرقم يدويًا (بدل زرار main_makit)
  *   dev_get_settings                -> dev_settings (إعدادات الكاميرا/القراءة)
- *   dev_set_settings { camId?, camIndex?, plateDigits?, plateFrames?, roi?, debugDir? }
+ *   dev_set_settings { camId?, camIndex?, camBackend?, plateDigits?, plateFrames?, roi?, debugDir? }
  *   dev_list_cameras                -> dev_cameras { cameras: [{index, device}] }
  * Socket events (السيرفر -> العميل):
  *   dev_mode_status { enabled }
  *   dev_turns       { port, readyTurns, stopTurns, homeTurns }
  *   dev_plate       { camera, number }  الرقم المقروء من شاشة العربية (null لو فشلت القراءة)
- *   dev_settings    { camId, camIndex, plateDigits, plateFrames, roi, debugDir }
- *   dev_cameras     { cameras }
+ *   dev_settings    { camId, camIndex, camBackend, plateDigits, plateFrames, roi, debugDir }
+ *   dev_cameras     { platform, backend, backends, cameras }
  *   dev_error       { event, message }
  *
  * قراءة رقم العربية: عند تشغيل dev_mode بيشغّل السيرفر utils/ai/plate_reader.py
@@ -45,7 +45,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const db = require("../config/database");
 const devCycle = require("./devCycle");
 const { resolveOperator, AUTH_REQUIRED } = require("../middleware/auth");
@@ -53,6 +53,7 @@ const { resolveOperator, AUTH_REQUIRED } = require("../middleware/auth");
 // حد الفيرموير في traffic.ino: turns >= 0 && turns <= 6.6
 const MAX_TURNS = 6.6;
 const DEFAULTS = { readyTurns: 4.1, stopTurns: 3.1, homeTurns: 0 };
+const CAM_BACKENDS = ["auto", "v4l2", "avfoundation", "any"];
 const FIELDS = Object.keys(DEFAULTS);
 
 // فواصل التسلسل عند stop (كانت delay() ثابتة في esp_car) — بدون حجب الـ loop
@@ -72,6 +73,7 @@ const PLATE_SCRIPT = path.join(__dirname, "..", "utils", "ai", "plate_reader.py"
 const SETTINGS_DEFAULTS = {
   camId: "cam1",
   camIndex: 0,
+  camBackend: "auto", // auto | v4l2 | avfoundation | any
   plateDigits: 4,
   plateFrames: 5,
   roi: null, // { x, y, w, h } كنسب 0..1 من الصورة، أو null = الصورة كلها
@@ -149,6 +151,11 @@ async function saveSettings(patch) {
     next.camId = id;
   }
   if (patch.camIndex !== undefined) next.camIndex = intIn(patch.camIndex, 0, 63, "camIndex");
+  if (patch.camBackend !== undefined) {
+    const b = String(patch.camBackend).trim().toLowerCase();
+    if (!CAM_BACKENDS.includes(b)) throw new Error(`camBackend must be one of: ${CAM_BACKENDS.join(", ")}`);
+    next.camBackend = b;
+  }
   if (patch.plateDigits !== undefined) next.plateDigits = intIn(patch.plateDigits, 1, 12, "plateDigits");
   if (patch.plateFrames !== undefined) next.plateFrames = intIn(patch.plateFrames, 1, 20, "plateFrames");
   if (patch.roi !== undefined) next.roi = validateRoi(patch.roi);
@@ -170,17 +177,37 @@ async function saveSettings(patch) {
   return next;
 }
 
+// الباك إند الفعلي اللي القارئ هيستخدمه (نفس منطق auto في plate_reader.py)
+function effectiveBackend() {
+  if (settings.camBackend !== "auto") return settings.camBackend;
+  if (process.platform === "darwin") return "avfoundation";
+  if (process.platform === "linux") return "v4l2";
+  return "any";
+}
+
 function listCameras() {
-  try {
-    return fs
-      .readdirSync("/dev")
-      .map((f) => /^video(\d+)$/.exec(f))
-      .filter(Boolean)
-      .map((m) => ({ index: Number(m[1]), device: `/dev/${m[0]}` }))
-      .sort((a, b) => a.index - b.index);
-  } catch (_) {
-    return []; // غير Linux
+  if (effectiveBackend() === "v4l2") {
+    try {
+      return fs
+        .readdirSync("/dev")
+        .map((f) => /^video(\d+)$/.exec(f))
+        .filter(Boolean)
+        .map((m) => ({ index: Number(m[1]), device: `/dev/${m[0]}` }))
+        .sort((a, b) => a.index - b.index);
+    } catch (_) {
+      return [];
+    }
   }
+  if (process.platform === "darwin") {
+    // macOS مفيهوش /dev/videoN: بنجيب الأسماء من system_profiler (ترتيبها = index في AVFoundation)
+    try {
+      const out = execFileSync("system_profiler", ["SPCameraDataType", "-json"], { timeout: 5000 });
+      const items = JSON.parse(out.toString()).SPCameraDataType || [];
+      if (items.length) return items.map((c, i) => ({ index: i, device: c._name || `Camera ${i}` }));
+    } catch (_) {}
+  }
+  // مفيش طريقة لعمل enumerate: قايمة indices شائعة والمستخدم يجرّب
+  return [0, 1, 2, 3].map((i) => ({ index: i, device: `Camera ${i}` }));
 }
 
 function syncPlateSubscription() {
@@ -314,6 +341,7 @@ function readerEnv() {
     ...process.env,
     DEV_CAM_ID: settings.camId,
     DEV_CAM_INDEX: String(settings.camIndex),
+    DEV_CAM_BACKEND: settings.camBackend,
     DEV_PLATE_DIGITS: String(settings.plateDigits),
     DEV_PLATE_FRAMES: String(settings.plateFrames),
     DEV_PLATE_DEBUG: settings.debugDir || "",
@@ -479,7 +507,12 @@ function registerSocket(socket) {
   );
 
   on("dev_list_cameras", () => {
-    socket.emit("dev_cameras", { cameras: listCameras() });
+    socket.emit("dev_cameras", {
+      platform: process.platform,
+      backend: effectiveBackend(),
+      backends: CAM_BACKENDS,
+      cameras: listCameras(),
+    });
   });
 
   on(

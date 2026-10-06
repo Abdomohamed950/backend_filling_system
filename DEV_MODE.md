@@ -75,7 +75,7 @@
 | UI → Server | `dev_set_settings` | أي مجموعة من الحقول تحت |
 | Server → كل العملاء | `dev_settings` | الإعدادات الحالية كاملة |
 | UI → Server | `dev_list_cameras` | — (عشان قايمة الاختيار) |
-| Server → UI | `dev_cameras` | `{ "cameras": [{ "index": 0, "device": "/dev/video0" }] }` |
+| Server → UI | `dev_cameras` | `{ "platform": "linux", "backend": "v4l2", "backends": ["auto","v4l2","avfoundation","any"], "cameras": [{ "index": 0, "device": "/dev/video0" }] }` — على macOS الأسماء من `system_profiler` |
 | UI → Server | `dev_capture_plate` | — تشغيل القراءة يدويًا. dev_mode لازم يكون شغال |
 | Server → كل العملاء | `dev_plate` | `{ "camera": "cam1", "number": "1234" }` — `number: null` لو القراءة فشلت |
 
@@ -84,7 +84,8 @@
 | الحقل | النوع | الافتراضي | القيود | المعنى |
 |---|---|---|---|---|
 | `camId` | string | `"cam1"` | حروف/أرقام/`_`/`-` بس، حتى 32 | اسم الكاميرا في الـ topics (`<camId>/esp` و`<camId>/plate`) |
-| `camIndex` | int | `0` | 0–63 | رقم جهاز الكاميرا (`/dev/videoN`) — خد القايمة من `dev_cameras` |
+| `camIndex` | int | `0` | 0–63 | رقم جهاز الكاميرا (`/dev/videoN` على Linux، ترتيب الكاميرا على macOS) — خد القايمة من `dev_cameras` |
+| `camBackend` | string | `"auto"` | `auto` \| `v4l2` \| `avfoundation` \| `any` | باك إند الكاميرا. `auto` = `v4l2` على Linux و`avfoundation` على macOS. القايمة وقيمة `auto` الفعلية جاية في `dev_cameras` |
 | `plateDigits` | int | `4` | 1–12 | عدد خانات الرقم المتوقع. أي قراءة بعدد مختلف بتتتجاهل |
 | `plateFrames` | int | `5` | 1–20 | عدد الفريمات اللي بيتصوّت عليها (الأكتر تكرارًا بيكسب) |
 | `roi` | object \| null | `null` | `{x,y,w,h}` كنسب 0..1، و`x+w ≤ 1` و`y+h ≤ 1` | المربع اللي القراءة بتتركز عليه (شاشة العربية بس). `null` = الصورة كلها |

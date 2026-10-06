@@ -13,7 +13,8 @@ MQTT:
 إعدادات (متغيرات بيئة):
   MQTT_URL           mqtt://localhost:1883 (نفس متغير السيرفر)
   DEV_CAM_ID         cam1
-  DEV_CAM_INDEX      0         رقم جهاز الكاميرا (/dev/videoN)
+  DEV_CAM_INDEX      0         رقم جهاز الكاميرا (/dev/videoN على Linux، index على macOS)
+  DEV_CAM_BACKEND    auto      auto | v4l2 | avfoundation | any  (auto = حسب النظام)
   DEV_PLATE_DIGITS   4         عدد الخانات المتوقع (esp_car بيعرض 4 أرقام)
   DEV_PLATE_ROI      x,y,w,h   اختياري، كنسب 0..1 من الصورة لتضييق القراءة على الشاشة
   DEV_PLATE_FRAMES   5         عدد الفريمات اللي بيتصوّت عليها (الـ OLED بيرتعش)
@@ -35,6 +36,7 @@ import paho.mqtt.client as mqtt
 
 CAM_ID = os.environ.get("DEV_CAM_ID", "cam1")
 CAM_INDEX = int(os.environ.get("DEV_CAM_INDEX", "0"))
+CAM_BACKEND = os.environ.get("DEV_CAM_BACKEND", "auto").lower()
 DIGITS = int(os.environ.get("DEV_PLATE_DIGITS", "4"))
 FRAMES = int(os.environ.get("DEV_PLATE_FRAMES", "5"))
 DEBUG_DIR = os.environ.get("DEV_PLATE_DEBUG", "")
@@ -49,6 +51,22 @@ MQTT_PORT = _url.port or 1883
 TOPIC_TRIGGER = f"{CAM_ID}/esp"
 TOPIC_RESULT = f"{CAM_ID}/plate"
 
+
+
+def capture_backend():
+    """باك إند OpenCV المناسب: V4L2 على Linux، AVFoundation على macOS."""
+    if CAM_BACKEND == "auto":
+        if sys.platform == "darwin":
+            return cv2.CAP_AVFOUNDATION
+        if sys.platform.startswith("linux"):
+            return cv2.CAP_V4L2
+        return cv2.CAP_ANY
+    return {
+        "v4l2": cv2.CAP_V4L2,
+        "avfoundation": cv2.CAP_AVFOUNDATION,
+    }.get(CAM_BACKEND, cv2.CAP_ANY)
+
+
 reader = easyocr.Reader(["en"], gpu=False)
 
 latest = None
@@ -62,7 +80,7 @@ def grab_loop():
     cap = None
     while running:
         if cap is None or not cap.isOpened():
-            cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(CAM_INDEX, capture_backend())
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

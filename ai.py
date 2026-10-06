@@ -27,7 +27,8 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;50000
 reader = easyocr.Reader(['en'], gpu=False)
 
 # ── detect if display is available ──
-HEADLESS = os.environ.get("DISPLAY", "") == ""
+# macOS/Windows مفيهمش DISPLAY (X11) بس عندهم شاشة؛ DISPLAY بيتفحص على Linux بس
+HEADLESS = sys.platform.startswith("linux") and os.environ.get("DISPLAY", "") == ""
 
 
 def preprocess_for_ocr(crop):
@@ -390,7 +391,8 @@ class CameraManager:
                                     cv2.WND_PROP_TOPMOST,
                                     1
                                 )
-                                os.system(f'wmctrl -r "{cam.cam_id}" -b add,above')
+                                if sys.platform.startswith("linux"):
+                                    os.system(f'wmctrl -r "{cam.cam_id}" -b add,above')
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         break
             finally:
