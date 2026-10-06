@@ -47,6 +47,7 @@ function stop_filling(mqttClient, data) {
   }
 
   // "force_stop" - the plain "stop" branch is commented out in the firmware.
+  sessions.noteForceStop(port);
   mqttClient.publish(`${port}/state`, "force_stop", COMMAND_OPTS);
   console.log(`⏹️  ${port} force_stop`);
   return true;

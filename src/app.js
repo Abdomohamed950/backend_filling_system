@@ -10,6 +10,7 @@ const reportRoutes = require("./routes/reportRoutes");
 const syncSettingsRoutes = require("./routes/syncSettingsRoutes");
 const scadaChannelsRoutes = require("./routes/scadaChannelsRoutes");
 const receiptsRoutes = require("./routes/receiptsRoutes");
+const trucksRoutes = require("./routes/trucksRoutes");
 const { attachUser, AUTH_REQUIRED } = require("./middleware/auth");
 const db = require("./config/database");
 const Session = require("./models/sessionModel");
@@ -53,6 +54,7 @@ app.use("/api", reportRoutes);
 app.use("/api", syncSettingsRoutes);
 app.use("/api", scadaChannelsRoutes);
 app.use("/api", receiptsRoutes);
+app.use("/api", trucksRoutes);
 
 // 404 handler
 app.use((req, res) => {

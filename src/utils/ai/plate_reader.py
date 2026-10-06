@@ -1,0 +1,193 @@
+"""
+dev_mode: يقرأ رقم العربية من الصورة الظاهرة على شاشة esp_car (OLED) عن طريق
+كاميرا USB موصولة باللابتوب، ويبعته على MQTT. ملف منفصل عن ai.py (كاميرات RTSP).
+
+يشغّله/يوقّفه السيرفر مع dev_mode (src/services/devMode.js)، ويتشغّل يدويًا
+للتجربة:  python3 src/utils/ai/plate_reader.py
+
+MQTT:
+  <cam>/esp    "start" (من main_makit عند الزرار، أو dev_capture_plate من الواجهة)
+               -> يلتقط ويقرأ
+  <cam>/plate  الرقم المقروء (digits فقط)، أو "" لو فشل القراءة (غير retained)
+
+إعدادات (متغيرات بيئة):
+  MQTT_URL           mqtt://localhost:1883 (نفس متغير السيرفر)
+  DEV_CAM_ID         cam1
+  DEV_CAM_INDEX      0         رقم جهاز الكاميرا (/dev/videoN)
+  DEV_PLATE_DIGITS   4         عدد الخانات المتوقع (esp_car بيعرض 4 أرقام)
+  DEV_PLATE_ROI      x,y,w,h   اختياري، كنسب 0..1 من الصورة لتضييق القراءة على الشاشة
+  DEV_PLATE_FRAMES   5         عدد الفريمات اللي بيتصوّت عليها (الـ OLED بيرتعش)
+  DEV_PLATE_DEBUG    مسار مجلد لحفظ الفريمات للمعايرة (اختياري)
+"""
+
+import os
+import re
+import sys
+import time
+import threading
+from collections import Counter
+from urllib.parse import urlparse
+
+import cv2
+import numpy as np
+import easyocr
+import paho.mqtt.client as mqtt
+
+CAM_ID = os.environ.get("DEV_CAM_ID", "cam1")
+CAM_INDEX = int(os.environ.get("DEV_CAM_INDEX", "0"))
+DIGITS = int(os.environ.get("DEV_PLATE_DIGITS", "4"))
+FRAMES = int(os.environ.get("DEV_PLATE_FRAMES", "5"))
+DEBUG_DIR = os.environ.get("DEV_PLATE_DEBUG", "")
+ROI = None
+if os.environ.get("DEV_PLATE_ROI"):
+    ROI = tuple(float(v) for v in os.environ["DEV_PLATE_ROI"].split(","))
+
+_url = urlparse(os.environ.get("MQTT_URL", "mqtt://localhost:1883"))
+MQTT_HOST = _url.hostname or "localhost"
+MQTT_PORT = _url.port or 1883
+
+TOPIC_TRIGGER = f"{CAM_ID}/esp"
+TOPIC_RESULT = f"{CAM_ID}/plate"
+
+reader = easyocr.Reader(["en"], gpu=False)
+
+latest = None
+latest_lock = threading.Lock()
+running = True
+
+
+def grab_loop():
+    """يفضل قارئ الكاميرا شغال عشان ما نقرأش فريم قديم من الـ buffer."""
+    global latest
+    cap = None
+    while running:
+        if cap is None or not cap.isOpened():
+            cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_V4L2)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not cap.isOpened():
+                print(f"❌ camera {CAM_INDEX} not available, retrying...", flush=True)
+                time.sleep(2)
+                continue
+            print(f"📷 camera {CAM_INDEX} open", flush=True)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.release()
+            cap = None
+            time.sleep(0.5)
+            continue
+        with latest_lock:
+            latest = frame
+    if cap is not None:
+        cap.release()
+
+
+def crop_roi(frame):
+    if not ROI:
+        return frame
+    h, w = frame.shape[:2]
+    x, y, rw, rh = ROI
+    return frame[int(y * h):int((y + rh) * h), int(x * w):int((x + rw) * w)]
+
+
+def preprocess(img):
+    h, w = img.shape[:2]
+    scale = max(2, 400 // max(1, min(h, w)) + 1)
+    img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # شاشة OLED: أرقام فاتحة على خلفية غامقة
+    if np.mean(gray) < 127:
+        gray = cv2.bitwise_not(gray)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return binary
+
+
+def read_digits(img):
+    """(الرقم، الثقة) أو (None, 0). بيجمّع الأجزاء اللي EasyOCR بيقسمها يمين/شمال."""
+    best = (None, 0.0)
+    for variant in (img, preprocess(img)):
+        parts = reader.readtext(variant, detail=1, allowlist="0123456789")
+        parts.sort(key=lambda p: p[0][0][0])  # من الشمال لليمين
+        text = "".join(re.sub(r"\D", "", p[1]) for p in parts)
+        if len(text) != DIGITS or not parts:
+            continue
+        conf = sum(p[2] for p in parts) / len(parts)
+        if conf > best[1]:
+            best = (text, conf)
+    return best
+
+
+def capture_and_read():
+    votes = Counter()
+    conf_sum = Counter()
+    for i in range(FRAMES):
+        with latest_lock:
+            frame = None if latest is None else latest.copy()
+        if frame is None:
+            time.sleep(0.2)
+            continue
+        roi = crop_roi(frame)
+        if DEBUG_DIR:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            cv2.imwrite(os.path.join(DEBUG_DIR, f"{int(time.time())}_{i}.jpg"), roi)
+        number, conf = read_digits(roi)
+        if number:
+            votes[number] += 1
+            conf_sum[number] += conf
+        time.sleep(0.15)  # فريمات مختلفة بدل نفس الفريم
+
+    if not votes:
+        return None
+    # الأكتر تكرارًا، وعند التعادل الأعلى ثقة
+    return max(votes, key=lambda n: (votes[n], conf_sum[n]))
+
+
+busy = threading.Lock()
+
+
+def handle_trigger(client):
+    if not busy.acquire(blocking=False):
+        return  # قراءة جارية بالفعل
+    try:
+        number = capture_and_read()
+        client.publish(TOPIC_RESULT, number or "", qos=1, retain=False)
+        print(f"🔢 {TOPIC_RESULT}: {number or '(not read)'}", flush=True)
+    finally:
+        busy.release()
+
+
+def on_connect(client, userdata, flags, reason_code, properties=None):
+    print(f"✅ MQTT connected ({MQTT_HOST}:{MQTT_PORT})", flush=True)
+    client.subscribe(TOPIC_TRIGGER, qos=1)
+
+
+def on_message(client, userdata, msg):
+    if msg.retain or msg.payload.decode(errors="ignore").strip() != "start":
+        return
+    threading.Thread(target=handle_trigger, args=(client,), daemon=True).start()
+
+
+def main():
+    global running
+    threading.Thread(target=grab_loop, daemon=True).start()
+
+    # paho 2.x محتاج callback_api_version؛ 1.x ما يعرفهوش
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+    else:
+        client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_message = on_message
+    client.connect(MQTT_HOST, MQTT_PORT, 60)
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        running = False
+
+
+if __name__ == "__main__":
+    sys.exit(main())

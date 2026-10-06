@@ -52,9 +52,9 @@ const VALVE_STATE_ALIASES = {
   closing_final: "closing",
 };
 
-// The only mode buildConf() can express today; "pulse" and "milli ampere" use a
-// completely different config[] layout in esp.ino.
-const SUPPORTED_MODE = "modbus";
+// Modes buildConf() can express; "milli ampere" uses yet another config[] layout.
+const SUPPORTED_MODE = "modbus"; // default when the row has no mode
+const SUPPORTED_MODES = ["modbus", "pulse"];
 
 /*
  * The firmware compares these fields with exact, case-sensitive strings, so the
@@ -105,7 +105,60 @@ const CONF_THROTTLE_MS = 2000;
 const lastConfSent = new Map();
 
 /**
+ * pulse branch of setup() in main_makit.ino - 10 fields:
+ *   0 mode ("pulse")        5 secondCloseLag   (liters)
+ *   1 litersPerPulse        6 thirdCloseTime   (pidTime, ms)
+ *   2 firstCloseTime (ms)   7 thirdCloseLag    (liters)
+ *   3 secondCloseTime (ms)  8 addedTime (ms)
+ *   4 firstCloseLag (liters) 9 valveType
+ * The firmware closes in three stages as the remaining quantity drops under
+ * firstCloseLag, then secondCloseLag, then thirdCloseLag (its else-if chain
+ * assumes first >= second >= third), so any other order is refused here.
+ * litersPerPulse <= 0 would leave the counter frozen and the valve open.
+ */
+function buildPulseConf(portName, row, num) {
+  const valveType = normalize(row.valveType, VALVE_TYPES, "valveType", portName);
+  if (!valveType) return null;
+
+  const litersPerPulse = Number(row.litersPerPulse);
+  if (!Number.isFinite(litersPerPulse) || litersPerPulse <= 0) {
+    console.error(
+      `❌ ${portName}: litersPerPulse must be a number > 0 for pulse mode (got "${row.litersPerPulse}")`
+    );
+    return null;
+  }
+
+  const lags = [num(row.firstCloseLag), num(row.SecondCloseLag), num(row.thirdCloseLag)];
+  if (lags.some((l) => l < 0) || lags[0] < lags[1] || lags[1] < lags[2]) {
+    console.error(
+      `❌ ${portName}: close lags must satisfy first >= second >= third >= 0 (got ${lags.join(", ")})`
+    );
+    return null;
+  }
+
+  const conf = [
+    "pulse",
+    litersPerPulse,
+    num(row.firstCloseTime),
+    num(row.secondCloseTime),
+    lags[0],
+    lags[1],
+    num(row.pidTime),
+    lags[2],
+    num(row.addedTime),
+    valveType,
+  ].join(",");
+
+  if (conf.split(",").length !== 10) {
+    console.error(`❌ malformed pulse conf for ${portName}: ${conf}`);
+    return null;
+  }
+  return conf;
+}
+
+/**
  * Build the config string the firmware expects on <port>/conf.
+ * Modbus layout below; pulse has its own (see buildPulseConf).
  * Field order must match config[] in esp.ino (modbus branch of setup()):
  *   0 mode            7  secondCloseTime
  *   1 baudrate        8  firstCloseLag
@@ -139,12 +192,13 @@ async function buildConf(portName) {
   };
 
   const mode = String(row.mode || SUPPORTED_MODE).trim();
-  if (mode !== SUPPORTED_MODE) {
+  if (!SUPPORTED_MODES.includes(mode)) {
     console.error(
-      `❌ ${portName}: mode "${mode}" is not supported by buildConf() yet (only ${SUPPORTED_MODE})`
+      `❌ ${portName}: mode "${mode}" is not supported by buildConf() yet (only ${SUPPORTED_MODES.join(", ")})`
     );
     return null;
   }
+  if (mode === "pulse") return buildPulseConf(portName, row, num);
 
   const endian = normalize(row.endian, ENDIAN_ALIASES, "endian", portName);
   const registerType = normalize(
@@ -188,6 +242,8 @@ async function buildConf(portName) {
   return conf;
 }
 
+let sharedClient = null;
+
 function mqtt_setup() {
   const mqttClient = mqtt.connect(MQTT_URL, {
     clientId: `filling_server_${process.pid}`,
@@ -209,6 +265,7 @@ function mqtt_setup() {
   mqttClient.on("error", (err) => console.error("❌ MQTT error:", err.message));
   mqttClient.on("offline", () => console.warn("⚠️  MQTT client offline"));
 
+  sharedClient = mqttClient;
   return mqttClient;
 }
 
@@ -236,6 +293,32 @@ function getAllSnapshots() {
   const out = [];
   for (const port of lastByPort.keys()) out.push(...getSnapshot(port));
   return out;
+}
+
+/*
+ * الفيرموير بيطبّق الإعدادات مرة واحدة بس في setup() (baudrate، أوقات القفل،
+ * نوع الفلقة، slave id) وبعدها بيدخل while(1)، فاستلام <port>/conf جديد
+ * لوحده مش بيغيّرها. بعد تعديل ports_setting لازم الجهاز يتعمله reset: بيقوم،
+ * يطلب <port>/update، والسيرفر يرد بالـ conf الجديد (المسار الموجود فوق).
+ *
+ * مابنعملش reset وهو بيعبّي (هيقطع الفلقة في نص التعبئة)، ولا لجهاز offline
+ * (هياخد القيم الجديدة لوحده أول ما يشتغل).
+ * @returns {{sent: boolean, reason?: "busy"|"offline"|"mqtt_down"}}
+ */
+function applyConfigToDevice(port) {
+  if (!sharedClient || !sharedClient.connected) return { sent: false, reason: "mqtt_down" };
+
+  const last = new Map(getSnapshot(port));
+  const availability = last.get("availability")?.data;
+  const state = last.get("state")?.data;
+
+  if (availability !== "online") return { sent: false, reason: "offline" };
+  if (state === "filling" || state === "stoping") return { sent: false, reason: "busy" };
+
+  // غير retained: reset retained كان هيعيد تشغيل الجهاز عند كل reconnect
+  sharedClient.publish(`${port}/reset`, "1", { qos: 1, retain: false });
+  console.log(`🔁 ${port}/reset (إعدادات المنفذ اتغيرت)`);
+  return { sent: true };
 }
 
 function mqtt_messages(mqttClient, io) {
@@ -318,6 +401,7 @@ module.exports = {
   mqtt_setup,
   mqtt_messages,
   buildConf,
+  applyConfigToDevice,
   getSnapshot,
   getAllSnapshots,
 };

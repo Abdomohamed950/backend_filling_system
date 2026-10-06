@@ -8,7 +8,8 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "migrate": "node scripts/migrate-pg-to-sqlite.js",
-    "seed:receipts": "node scripts/seed-receipts.js"
+    "seed:receipts": "node scripts/seed-receipts.js",
+    "seed:trucks": "node scripts/seed-trucks.js"
   },
   "keywords": [],
   "author": "",

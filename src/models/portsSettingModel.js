@@ -23,17 +23,20 @@ const port = {
       flowRateAddress,
       registerType,
       valveType,
+      litersPerPulse,
+      thirdCloseLag,
     } = portSettingData;
 
     const query = `
       INSERT INTO ports_setting (
         name, mode, baudrate, serialFrame, endian, "slaveId", "registerAddress",
         "firstCloseTime", "secondCloseTime", "firstCloseLag", "SecondCloseLag",
-        "pidTime", "addedTime", "flowRateAddress", "registerType", "valveType")
+        "pidTime", "addedTime", "flowRateAddress", "registerType", "valveType",
+        "litersPerPulse", "thirdCloseLag")
       VALUES ($1, COALESCE($2,'modbus'), COALESCE($3,9600), COALESCE($4,'SERIAL_8N1'),
               $5, $6, $7, COALESCE($8,0), COALESCE($9,0), COALESCE($10,0),
               COALESCE($11,0), COALESCE($12,0), COALESCE($13,0), COALESCE($14,0),
-              $15, $16)
+              $15, $16, $17, COALESCE($18,0))
       RETURNING *
     `;
     const values = [
@@ -53,6 +56,8 @@ const port = {
       flowRateAddress,
       registerType,
       valveType,
+      litersPerPulse,
+      thirdCloseLag,
     ];
     const result = await db.query(query, values);
     return result.rows[0];
@@ -102,6 +107,8 @@ const port = {
       flowRateAddress,
       registerType,
       valveType,
+      litersPerPulse,
+      thirdCloseLag,
     } = portData;
 
     const query = `
@@ -121,8 +128,10 @@ const port = {
           "addedTime"       = COALESCE($13, "addedTime"),
           "flowRateAddress" = COALESCE($14, "flowRateAddress"),
           "registerType"    = COALESCE($15, "registerType"),
-          "valveType"       = COALESCE($16, "valveType")
-      WHERE id = $17
+          "valveType"       = COALESCE($16, "valveType"),
+          "litersPerPulse"  = COALESCE($17, "litersPerPulse"),
+          "thirdCloseLag"   = COALESCE($18, "thirdCloseLag")
+      WHERE id = $19
       RETURNING *
     `;
     const values = [
@@ -142,6 +151,8 @@ const port = {
       flowRateAddress,
       registerType,
       valveType,
+      litersPerPulse,
+      thirdCloseLag,
       id,
     ];
     const result = await db.query(query, values);

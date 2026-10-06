@@ -6,10 +6,12 @@
 const db = require("../config/database");
 const Receipts = require("../models/receiptsModel");
 const receiptSync = require("./receiptSync");
+const Trucks = require("../models/trucksModel");
 
 const CRISIS_BLOCKED_MESSAGE = "تم ملئ هذه السيارة مرة في وضع الأزمات اليوم";
 const NOT_FOUND_MESSAGE = "الإيصال غير موجود";
 const ALREADY_USED_MESSAGE = "الإيصال مستخدم بالفعل";
+const TRIPS_EXHAUSTED_MESSAGE = "الشاحنة وصلت للحد الأقصى من النقلات";
 
 /** هل الشاحنة دي اتملت في وضع الأزمات النهارده بالفعل؟ (مقابل get_truck_today) */
 async function truckFilledInCrisisToday(truckNum) {
@@ -30,6 +32,18 @@ async function truckFilledInCrisisToday(truckNum) {
  */
 async function checkReceipt({ receiptNumber, operatorId, truckNum, manualQuantity }) {
   const raw = String(receiptNumber ?? "").trim();
+
+  // حد نقلات الشاحنة المسجّلة (شاحنة غير مسجّلة أو حدها مقفول = تعدي). بنرفض
+  // قبل أي حاجة تانية عشان الإيصال ما يتحسبش مستخدم لتعبئة مش هتحصل.
+  const gate = await Trucks.checkLimit(truckNum);
+  if (!gate.ok) {
+    return {
+      status: "trips_exhausted",
+      message: TRIPS_EXHAUSTED_MESSAGE,
+      tripsDone: gate.truck.tripsDone,
+      maxTrips: gate.truck.maxTrips,
+    };
+  }
 
   // وضع الأزمات: المشغّل دخّل رقمه الشخصي بدل رقم إيصال
   if (operatorId !== undefined && operatorId !== null && raw === String(operatorId).trim()) {

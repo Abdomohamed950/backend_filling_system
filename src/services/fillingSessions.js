@@ -41,6 +41,8 @@ const LOGDATA_DEDUPE_MS = Number(process.env.FILL_LOG_DEDUPE_MS) || 60 * 1000;
 // حالات نهاية التعبئة على <port>/state ("stoping" مرحلة عابرة، ليست نهاية)
 const END_STATES = ["stop", "emergency_stop"];
 
+const Trucks = require("../models/trucksModel");
+
 const round3 = (v) => Math.round(v * 1000) / 1000;
 
 let io = null;
@@ -77,6 +79,7 @@ function portState(port) {
       settleTimer: null,
       settleDeadline: 0,
       settleReason: null,
+      forceStopped: false,
       lastLog: null,
       lastLogAt: 0,
       chain: Promise.resolve(),
@@ -227,6 +230,7 @@ function openRecord(port) {
       if (abandoned) emit("history_closed", { port, record: abandoned, reason: "abandoned" });
     }
 
+    s.forceStopped = false; // تعبئة جديدة: أي force_stop قديم ما يخصّهاش
     const meta = takeMeta(s, port) || {};
     const startMeter = meta.startMeter ?? s.lastMeter ?? null;
 
@@ -299,6 +303,7 @@ function closeRecord(port, reason) {
     const id = s.openId;
     if (!id) return;
     s.openId = null;
+    const forceStopped = s.forceStopped;
 
     const endMeter = Number.isFinite(s.lastMeter) ? s.lastMeter : null;
     const actualQuantity = meterDelta(s.startMeter, endMeter);
@@ -324,6 +329,17 @@ function closeRecord(port, reason) {
       `📕 ${port}: أُغلق سجل #${row.id} (${reason}) actual=${row.actualQuantity}, endMeter=${row.endMeter}`
     );
     emit("history_closed", { port, record: row, reason });
+
+    /*
+     * نقلة اتمّت لشاحنة مسجّلة (جدول trucks): stop عادي فقط. الطوارئ، وأي
+     * تعبئة أوقفها السيرفر بـ force_stop (إيقاف المشغّل/إلغاء)، مش بتتعد.
+     * شاحنة غير مسجّلة: incrementTrips بترجع null ومفيش أي أثر.
+     */
+    if (reason === "stop" && !forceStopped && row.truckNum) {
+      Trucks.incrementTrips(row.truckNum)
+        .then((truck) => truck && emit("truck_updated", { truck }))
+        .catch((err) => console.error(`❌ trips count (${row.truckNum}): ${err.message}`));
+    }
 
     // مزامنة SCADA fire-and-forget — أبدًا متأخرش أو توقف قفل السجل المحلي
     scadaSync.sendReadings2(row.id).catch((err) =>
@@ -422,8 +438,15 @@ function getSession(port) {
   };
 }
 
+/** السيرفر بعت force_stop للمنفذ: التعبئة دي مش بتتعد نقلة (انظر closeRecord) */
+function noteForceStop(port) {
+  portState(port).forceStopped = true;
+}
+
 module.exports = {
   setIo,
+  broadcast: emit,
+  noteForceStop,
   attachMeta,
   onFlowmeter,
   onState,

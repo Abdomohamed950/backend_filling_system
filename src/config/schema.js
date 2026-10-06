@@ -91,6 +91,21 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_history_open       ON history(portNum, exitTime)`,
 
   /*
+   * الشاحنات المسجّلة: كمية تتملي تلقائي (بدون إيصال) وحد نقلات اختياري.
+   * شاحنة غير مسجّلة بتعدي عادي من غير حد. plate بيتقارن نصًا بـ history.truckNum.
+   * tripsDone بيتعد عند إغلاق تعبئة عادية (stop) لشاحنة مسجّلة، حتى لو الحد مقفول.
+   */
+  `CREATE TABLE IF NOT EXISTS trucks (
+     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+     plate        TEXT    NOT NULL UNIQUE,
+     quantity     REAL,                       -- NULL = الكمية الافتراضية (dev_mode) أو من الإيصال
+     limitEnabled INTEGER NOT NULL DEFAULT 0, -- 1 = حد النقلات مفعّل
+     maxTrips     INTEGER NOT NULL DEFAULT 0,
+     tripsDone    INTEGER NOT NULL DEFAULT 0,
+     createdAt    TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+   )`,
+
+  /*
    * إعدادات مزامنة SCADA/Receipt API — صف واحد ثابت (id=1) قابل للتعديل من
    * الـ UI. القيم الافتراضية = عناوين النظام القديم (Python)، مع العلم أن
    * السيرفرين مش شغالين حاليًا — كل كود المزامنة لازم يتحمّل فشل الاتصال بيهم
@@ -132,7 +147,7 @@ const DDL = [
    )`,
 ];
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 
 /*
  * "CREATE TABLE IF NOT EXISTS" لا يضيف عمودًا جديدًا لجدول موجود بالفعل —
@@ -166,6 +181,20 @@ function migrate(db) {
     addColumnIfMissing(db, "history", "fillMode", "TEXT NOT NULL DEFAULT 'normal'");
 
     db.exec("INSERT OR IGNORE INTO sync_settings (id) VALUES (1)");
+
+    // v6: إعدادات وضع pulse (litersPerPulse = لتر/نبضة، thirdCloseLag = تأخير القفل الثالث)
+    addColumnIfMissing(db, "ports_setting", "litersPerPulse", "REAL");
+    addColumnIfMissing(db, "ports_setting", "thirdCloseLag", "INTEGER NOT NULL DEFAULT 0");
+
+    // v5: جدول الشاحنات كان dev_mode_trucks في أول نسخة من dev_mode
+    const legacy = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='dev_mode_trucks'")
+      .get();
+    if (legacy) {
+      db.exec(`INSERT OR IGNORE INTO trucks (plate, quantity, limitEnabled, maxTrips, tripsDone)
+               SELECT plate, quantity, limitEnabled, maxTrips, tripsDone FROM dev_mode_trucks`);
+      db.exec("DROP TABLE dev_mode_trucks");
+    }
 
     db.pragma(`user_version = ${SCHEMA_VERSION}`);
     db.exec("COMMIT");

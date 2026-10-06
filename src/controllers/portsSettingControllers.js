@@ -1,4 +1,5 @@
 const port = require("../models/portsSettingModel");
+const mqttTransport = require("../transport/mqtt");
 
 const portController = {
   // إنشاء مستخدم جديد
@@ -21,6 +22,8 @@ const portController = {
         flowRateAddress,
         registerType,
         valveType,
+        litersPerPulse,
+        thirdCloseLag,
       } = req.body;
       console.log(req.body);
       if (!name) {
@@ -46,6 +49,8 @@ const portController = {
         flowRateAddress,
         registerType,
         valveType,
+        litersPerPulse,
+        thirdCloseLag,
       });
       res.status(201).json({
         message: "port created successfully",
@@ -107,6 +112,8 @@ const portController = {
         flowRateAddress,
         registerType,
         valveType,
+        litersPerPulse,
+        thirdCloseLag,
       } = req.body;
 
       const existingport = await port.findById(id);
@@ -131,10 +138,21 @@ const portController = {
         flowRateAddress,
         registerType,
         valveType,
+        litersPerPulse,
+        thirdCloseLag,
       });
+
+      // الجهاز مش بيطبّق الإعدادات الجديدة إلا بعد restart (انظر mqtt.applyConfigToDevice).
+      // لو الاسم اتغير، الجهاز لسه بيستخدم الاسم القديم في الـ topics فمفيش حد يرد عليه.
+      const renamed = updatedport && updatedport.name !== existingport.name;
+      const device = renamed
+        ? { sent: false, reason: "renamed" }
+        : mqttTransport.applyConfigToDevice(existingport.name);
+
       res.json({
         message: "port updated successfully",
         port: updatedport,
+        device,
       });
     } catch (error) {
       console.error("Error updating port:", error);

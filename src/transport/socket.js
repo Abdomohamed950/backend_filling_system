@@ -9,6 +9,8 @@ const History = require("../models/historyModel");
 const { resolveOperator, AUTH_REQUIRED } = require("../middleware/auth");
 const barcodeFlow = require("../services/barcodeFlow");
 const receiptSync = require("../services/receiptSync");
+const devMode = require("../services/devMode");
+const Trucks = require("../models/trucksModel");
 
 const AI_SCRIPT = path.join(__dirname, "..", "utils", "ai", "app.py");
 // app.py يحمّل موديله من مسار نسبي "utils/ai/best.pt"، فمجلد التشغيل لازم يكون src/
@@ -26,6 +28,8 @@ function socket_setup(mqttClient, server) {
     },
   });
 
+  devMode.init(mqttClient, io);
+
   function replay(socket, events, label) {
     for (const [event, payload] of events) socket.emit(event, payload);
     if (events.length) {
@@ -40,6 +44,7 @@ function socket_setup(mqttClient, server) {
     // الحالة الحالية فورًا، وإلا تبقى البطاقات فاضية حتى أول تغيير
     replay(socket, getAllSnapshots(), "snapshot");
     socket.emit("ai_mode_status", { running: aiModeRunning });
+    devMode.registerSocket(socket);
 
     /*
      * snapshot أعلاه بيرجع بس تليمتري الجهاز (state/flowmeter/valve_state)
@@ -110,6 +115,19 @@ function socket_setup(mqttClient, server) {
         }
         // AUTH_REQUIRED=false وبلا توكن أصلًا — الوضع المسموح افتراضيًا
         // (بنش تيست بدون خدمة مصادقة، backend.md §1.1).
+      }
+
+      // حد نقلات الشاحنة المسجّلة؛ غير المسجّلة بتعدي (models/trucksModel.js)
+      const gate = await Trucks.checkLimit(data?.truck_number ?? data?.truckNumber ?? data?.truckNum);
+      if (!gate.ok) {
+        socket.emit("start_blocked", {
+          port: data?.port,
+          reason: gate.reason,
+          plate: gate.truck.plate,
+          tripsDone: gate.truck.tripsDone,
+          maxTrips: gate.truck.maxTrips,
+        });
+        return;
       }
       start_filling(mqttClient, data);
     });
