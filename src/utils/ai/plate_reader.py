@@ -21,6 +21,8 @@ MQTT:
   DEV_PLATE_ROI      x,y,w,h   اختياري، كنسب 0..1 من الصورة لتضييق القراءة على الشاشة
   DEV_PLATE_FRAMES   5         عدد الفريمات اللي بيتصوّت عليها (الـ OLED بيرتعش)
   DEV_PLATE_DEBUG    مسار مجلد لحفظ الفريمات للمعايرة (اختياري)
+  DEV_OCR_GPU        auto    auto = GPU لو CUDA متاح | 1 = GPU (CUDA أو Apple MPS) | 0 = CPU
+  DEV_PLATE_MAX_SIDE 800     أكبر ضلع للصورة قبل الـ OCR (تصغير = أسرع)
   DEV_PLATE_CAPTURES مسار مجلد لحفظ صورة "جرّب القراءة" قبل الـ OCR (اختياري)
 """
 
@@ -73,7 +75,24 @@ def capture_backend():
     }.get(CAM_BACKEND, cv2.CAP_ANY)
 
 
-reader = easyocr.Reader(["en"], gpu=False)
+MAX_SIDE = int(os.environ.get("DEV_PLATE_MAX_SIDE", "800"))
+CONF_OK = 0.6  # ثقة كفاية لقبول القراءة من أول محاولة من غير المعالجة التانية
+
+
+def use_gpu():
+    mode = os.environ.get("DEV_OCR_GPU", "auto").lower()
+    if mode in ("0", "false", "off"):
+        return False
+    if mode in ("1", "true", "on"):
+        return True
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+reader = easyocr.Reader(["en"], gpu=use_gpu())
 
 latest = None
 latest_lock = threading.Lock()
@@ -117,8 +136,11 @@ def crop_roi(frame):
 
 def preprocess(img):
     h, w = img.shape[:2]
-    scale = max(2, 400 // max(1, min(h, w)) + 1)
-    img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
+    # بنكبّر بس لو الصورة صغيرة (ROI ضيق)؛ الصورة الكبيرة أصلاً مش محتاجة تكبير
+    short = max(1, min(h, w))
+    if short < 200:
+        scale = -(-300 // short)  # ceil
+        img = cv2.resize(img, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # شاشة OLED: أرقام فاتحة على خلفية غامقة
     if np.mean(gray) < 127:
@@ -128,11 +150,23 @@ def preprocess(img):
     return binary
 
 
+def shrink(img):
+    """بيصغّر الصورة لو أكبر ضلع فيها أكبر من MAX_SIDE (سرعة الـ OCR بتتناسب مع المساحة)."""
+    h, w = img.shape[:2]
+    big = max(h, w)
+    if MAX_SIDE <= 0 or big <= MAX_SIDE:
+        return img
+    f = MAX_SIDE / big
+    return cv2.resize(img, (int(w * f), int(h * f)), interpolation=cv2.INTER_AREA)
+
+
 def read_digits(img):
-    """(الرقم، الثقة) أو (None, 0). بيجمّع الأجزاء اللي EasyOCR بيقسمها يمين/شمال."""
+    """(الرقم، الثقة) أو (None, 0). بيجمّع الأجزاء اللي EasyOCR بيقسمها يمين/شمال.
+    بيجرّب الصورة الأصلية الأول، ومش بيعمل المعالجة التانية لو القراءة الأولى واثقة."""
+    img = shrink(img)
     best = (None, 0.0)
-    for variant in (img, preprocess(img)):
-        parts = reader.readtext(variant, detail=1, allowlist="0123456789")
+    for make in (lambda: img, lambda: preprocess(img)):
+        parts = reader.readtext(make(), detail=1, allowlist="0123456789")
         parts.sort(key=lambda p: p[0][0][0])  # من الشمال لليمين
         text = "".join(re.sub(r"\D", "", p[1]) for p in parts)
         if len(text) != DIGITS or not parts:
@@ -140,6 +174,8 @@ def read_digits(img):
         conf = sum(p[2] for p in parts) / len(parts)
         if conf > best[1]:
             best = (text, conf)
+        if best[1] >= CONF_OK:
+            break
     return best
 
 
@@ -175,6 +211,8 @@ def save_capture(client):
 def capture_and_read():
     votes = Counter()
     conf_sum = Counter()
+    started = time.time()
+    need = FRAMES // 2 + 1  # أغلبية: مفيش داعي نكمّل بعد ما رقم ياخد أغلبية الفريمات
     for i in range(FRAMES):
         with latest_lock:
             frame = None if latest is None else latest.copy()
@@ -189,8 +227,11 @@ def capture_and_read():
         if number:
             votes[number] += 1
             conf_sum[number] += conf
+        if votes and max(votes.values()) >= need:
+            break
         time.sleep(0.15)  # فريمات مختلفة بدل نفس الفريم
 
+    print(f"⏱️ OCR {time.time() - started:.1f}s ({i + 1}/{FRAMES} frames)", flush=True)
     if not votes:
         return None
     # الأكتر تكرارًا، وعند التعادل الأعلى ثقة
