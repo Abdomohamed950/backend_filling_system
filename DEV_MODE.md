@@ -76,7 +76,8 @@
 | Server → كل العملاء | `dev_settings` | الإعدادات الحالية كاملة |
 | UI → Server | `dev_list_cameras` | — (عشان قايمة الاختيار) |
 | Server → UI | `dev_cameras` | `{ "platform": "linux", "backend": "v4l2", "backends": ["auto","v4l2","avfoundation","any"], "cameras": [{ "index": 0, "device": "/dev/video0" }] }` — على macOS الأسماء من `system_profiler` |
-| UI → Server | `dev_capture_plate` | — تشغيل القراءة يدويًا. dev_mode لازم يكون شغال |
+| UI → Server | `dev_capture_plate` | — تشغيل القراءة يدويًا (بيحفظ صورة الكاميرا أول، وبعدين OCR). dev_mode لازم يكون شغال |
+| Server → كل العملاء | `dev_plate_image` | `{ "camera": "cam1", "file": "1760000000000.jpg", "url": "/api/plate-captures/1760000000000.jpg" }` — بيوصل **قبل** نتيجة الـ OCR مباشرة بعد ما الصورة تتحفظ. (لو ROI متحدد بيتحفظ كمان `<file>_roi.jpg` بنفس الاسم + `_roi`). بيتحفظ آخر 50 صورة بس، في `data/plate_captures/` |
 | Server → كل العملاء | `dev_plate` | `{ "camera": "cam1", "number": "1234" }` — `number: null` لو القراءة فشلت |
 
 حقول `dev_settings` (كلها في نفس شاشة إعدادات الكاميرا في الواجهة):

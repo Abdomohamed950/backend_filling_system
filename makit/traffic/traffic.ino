@@ -6,6 +6,7 @@
 
 // ======= variables =======
 float current_position;
+bool homed = false; // false لو الـ homing فشل (limit switch مش بيتقفل): ممنوع الحركة
 float target_position = 4.1; // موضع الجاهزية، السيرفر يحدّثه عبر <port>/turns_ready (dev_mode)
 
 // ======= WIFI + Config (LittleFS) =======
@@ -86,6 +87,7 @@ bool writeFile(const char *path, const String &data)
 #define red_led D2
 #define green_led D4
 #define yello_led D3
+#define HOMING_MAX_STEPS (12 * STEPS_PER_REV) // أقصى مشوار للبحث عن الـ switch (~10 ثواني)
 
 // ======= Functions =======
 void stepMotor(int steps, bool dir)
@@ -108,8 +110,17 @@ void homeMotor()
 
     // الاتجاه ناحية limit switch
     digitalWrite(DIR_PIN, LOW);
+    long searched = 0;
     while (digitalRead(LIMIT_SWITCH_PIN))
     {
+        if (searched++ >= HOMING_MAX_STEPS)
+        {
+            // الـ switch مش متوصل/مش بيتقفل: كمّل الـ boot عشان WiFi والـ AP يشتغلوا
+            Serial.println("Homing FAILED: limit switch not triggered. Check wiring (switch to GND, D1).");
+            homed = false;
+            digitalWrite(red_led, 1);
+            return;
+        }
         yield();
         digitalWrite(STEP_PIN, HIGH);
         delayMicroseconds(2000);
@@ -124,10 +135,41 @@ void homeMotor()
 
     // خلي دي هي الموضع 0
     current_position = 0;
+    homed = true;
     digitalWrite(green_led, 0);
     digitalWrite(red_led, 1);
 
     Serial.println("Home position set at 14 steps away from switch!");
+}
+
+// لون الليد حسب قرب العربية من موضع الجاهزية (target_position)
+void updatePositionLeds()
+{
+    float diff = fabs(current_position - target_position);
+    if (diff < 0.001)
+    {
+        digitalWrite(yello_led, 1);
+        digitalWrite(red_led, 0);
+        digitalWrite(green_led, 0);
+        yello_blink = 0;
+        green_blink = 0;
+    }
+    else if (diff < 0.5)
+    {
+        digitalWrite(yello_led, 0);
+        digitalWrite(green_led, 0);
+        digitalWrite(red_led, 0);
+        yello_blink = 1;
+        green_blink = 0;
+    }
+    else
+    {
+        digitalWrite(red_led, 1);
+        digitalWrite(yello_led, 0);
+        digitalWrite(green_led, 0);
+        yello_blink = 0;
+        green_blink = 0;
+    }
 }
 
 // ======= MQTT Callback =======
@@ -150,9 +192,14 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
         Serial.print("Received turns: ");
         Serial.println(turns);
 
-        if (turns >= 0 && turns <= 6.6)
+        if (!homed)
         {
-            int steps = abs(current_position - turns) * STEPS_PER_REV;
+            Serial.println("Ignored: motor not homed");
+        }
+        else if (turns >= 0 && turns <= 6.6)
+        {
+            // lroundf مش القص: 4.1f*200 = 819.99998 كان بيتقص لـ 819 وبيتراكم انحراف خطوة مع كل حركة
+            int steps = lroundf(fabs(current_position - turns) * STEPS_PER_REV);
             if (current_position < turns)
                 stepMotor(steps, false);
             else
@@ -160,30 +207,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
 
             current_position = turns;
 
-            if (current_position == target_position)
-            {
-                digitalWrite(yello_led, 1);
-                digitalWrite(red_led, 0);
-                digitalWrite(green_led, 0);
-                yello_blink = 0;
-                green_blink = 0;
-            }
-            else if (fabs(current_position - target_position) < 0.5)
-            {
-                digitalWrite(yello_led, 0);
-                digitalWrite(green_led, 0);
-                digitalWrite(red_led, 0);
-                yello_blink = 1;
-                green_blink = 0;
-            }
-            else
-            {
-                digitalWrite(red_led, 1);
-                digitalWrite(yello_led, 0);
-                digitalWrite(green_led, 0);
-                yello_blink = 0;
-                green_blink = 0;
-            }
+            updatePositionLeds();
         }
     }
 
@@ -191,7 +215,12 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
         float ready = msg.toFloat();
         if (ready >= 0 && ready <= 6.6)
+        {
             target_position = ready;
+            // الموضع الجاهز اتغيّر والعربية واقفة: حدّث الليد (إلا أثناء التعبئة أو بعد stop)
+            if (!green_blink && digitalRead(green_led) == LOW)
+                updatePositionLeds();
+        }
     }
 
     else if (String(topic) == mqtt_topic_state)
@@ -406,7 +435,7 @@ void setup()
     Serial.begin(115200);
     pinMode(DIR_PIN, OUTPUT);
     pinMode(STEP_PIN, OUTPUT);
-    pinMode(LIMIT_SWITCH_PIN, INPUT);
+    pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP); // الـ switch بيوصّل D1 بالـ GND لما يتقفل
     pinMode(red_led, OUTPUT);
     pinMode(green_led, OUTPUT);
     pinMode(yello_led, OUTPUT);

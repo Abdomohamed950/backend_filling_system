@@ -8,6 +8,8 @@ dev_mode: يقرأ رقم العربية من الصورة الظاهرة على
 MQTT:
   <cam>/esp    "start" (من main_makit عند الزرار، أو dev_capture_plate من الواجهة)
                -> يلتقط ويقرأ
+  <cam>/esp    "capture" (زرار "جرّب القراءة" في الواجهة) = نفس "start" لكن بيحفظ
+               صورة الكاميرا الأول قبل الـ OCR ويبعت اسم الملف على <cam>/plate_image
   <cam>/plate  الرقم المقروء (digits فقط)، أو "" لو فشل القراءة (غير retained)
 
 إعدادات (متغيرات بيئة):
@@ -19,6 +21,7 @@ MQTT:
   DEV_PLATE_ROI      x,y,w,h   اختياري، كنسب 0..1 من الصورة لتضييق القراءة على الشاشة
   DEV_PLATE_FRAMES   5         عدد الفريمات اللي بيتصوّت عليها (الـ OLED بيرتعش)
   DEV_PLATE_DEBUG    مسار مجلد لحفظ الفريمات للمعايرة (اختياري)
+  DEV_PLATE_CAPTURES مسار مجلد لحفظ صورة "جرّب القراءة" قبل الـ OCR (اختياري)
 """
 
 import os
@@ -40,6 +43,8 @@ CAM_BACKEND = os.environ.get("DEV_CAM_BACKEND", "auto").lower()
 DIGITS = int(os.environ.get("DEV_PLATE_DIGITS", "4"))
 FRAMES = int(os.environ.get("DEV_PLATE_FRAMES", "5"))
 DEBUG_DIR = os.environ.get("DEV_PLATE_DEBUG", "")
+CAPTURES_DIR = os.environ.get("DEV_PLATE_CAPTURES", "")
+MAX_CAPTURES = 50  # أقدم صور بتتمسح عشان المجلد ما يكبرش
 ROI = None
 if os.environ.get("DEV_PLATE_ROI"):
     ROI = tuple(float(v) for v in os.environ["DEV_PLATE_ROI"].split(","))
@@ -50,6 +55,7 @@ MQTT_PORT = _url.port or 1883
 
 TOPIC_TRIGGER = f"{CAM_ID}/esp"
 TOPIC_RESULT = f"{CAM_ID}/plate"
+TOPIC_IMAGE = f"{CAM_ID}/plate_image"
 
 
 
@@ -137,6 +143,35 @@ def read_digits(img):
     return best
 
 
+def save_capture(client):
+    """يحفظ فريم الكاميرا الحالي (كامل + ROI) قبل الـ OCR ويبعت اسم الملف."""
+    if not CAPTURES_DIR:
+        return
+    frame = None
+    for _ in range(25):  # استنى أول فريم لو الكاميرا لسه بتفتح
+        with latest_lock:
+            frame = None if latest is None else latest.copy()
+        if frame is not None:
+            break
+        time.sleep(0.2)
+    if frame is None:
+        return
+    os.makedirs(CAPTURES_DIR, exist_ok=True)
+    name = f"{int(time.time() * 1000)}.jpg"
+    cv2.imwrite(os.path.join(CAPTURES_DIR, name), frame)
+    if ROI:
+        cv2.imwrite(os.path.join(CAPTURES_DIR, name.replace(".jpg", "_roi.jpg")), crop_roi(frame))
+    old = sorted(f for f in os.listdir(CAPTURES_DIR) if f.endswith(".jpg") and not f.endswith("_roi.jpg"))
+    for f in old[:-MAX_CAPTURES]:
+        for victim in (f, f.replace(".jpg", "_roi.jpg")):
+            try:
+                os.remove(os.path.join(CAPTURES_DIR, victim))
+            except OSError:
+                pass
+    client.publish(TOPIC_IMAGE, name, qos=1, retain=False)
+    print(f"📸 saved {name}", flush=True)
+
+
 def capture_and_read():
     votes = Counter()
     conf_sum = Counter()
@@ -165,10 +200,12 @@ def capture_and_read():
 busy = threading.Lock()
 
 
-def handle_trigger(client):
+def handle_trigger(client, save=False):
     if not busy.acquire(blocking=False):
         return  # قراءة جارية بالفعل
     try:
+        if save:
+            save_capture(client)
         number = capture_and_read()
         client.publish(TOPIC_RESULT, number or "", qos=1, retain=False)
         print(f"🔢 {TOPIC_RESULT}: {number or '(not read)'}", flush=True)
@@ -182,9 +219,10 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 
 def on_message(client, userdata, msg):
-    if msg.retain or msg.payload.decode(errors="ignore").strip() != "start":
+    cmd = msg.payload.decode(errors="ignore").strip()
+    if msg.retain or cmd not in ("start", "capture"):
         return
-    threading.Thread(target=handle_trigger, args=(client,), daemon=True).start()
+    threading.Thread(target=handle_trigger, args=(client, cmd == "capture"), daemon=True).start()
 
 
 def main():

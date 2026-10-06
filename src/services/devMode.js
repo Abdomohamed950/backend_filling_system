@@ -30,6 +30,7 @@
  * Socket events (السيرفر -> العميل):
  *   dev_mode_status { enabled }
  *   dev_turns       { port, readyTurns, stopTurns, homeTurns }
+ *   dev_plate_image { camera, file, url }  صورة "جرّب القراءة" اتحفظت (قبل نتيجة الـ OCR)
  *   dev_plate       { camera, number }  الرقم المقروء من شاشة العربية (null لو فشلت القراءة)
  *   dev_settings    { camId, camIndex, camBackend, plateDigits, plateFrames, roi, debugDir }
  *   dev_cameras     { platform, backend, backends, cameras }
@@ -67,6 +68,8 @@ let tableReady = false;
 let plateProc = null;
 let cycle = null;
 
+// صور "جرّب القراءة" (بتتحفظ قبل الـ OCR) — بتتخدم من app.js على /api/plate-captures
+const CAPTURES_DIR = path.join(__dirname, "..", "..", "data", "plate_captures");
 const PLATE_SCRIPT = path.join(__dirname, "..", "utils", "ai", "plate_reader.py");
 
 // الافتراضيات؛ القيم المحفوظة من الواجهة بتغطي عليها
@@ -82,9 +85,10 @@ const SETTINGS_DEFAULTS = {
   arriveWaitMs: 5000, // انتظار وصول العربية تحت المنفذ قبل قراءة الرقم
 };
 let settings = { ...SETTINGS_DEFAULTS };
-let subscribedPlateTopic = null;
+let subscribedPlateTopics = [];
 
 const plateTopic = () => `${settings.camId}/plate`;
+const plateImageTopic = () => `${settings.camId}/plate_image`;
 const triggerTopic = () => `${settings.camId}/esp`;
 
 // port -> [timeout ids] لإلغاء تسلسل جارٍ لو وصلت حالة جديدة
@@ -211,12 +215,11 @@ function listCameras() {
 }
 
 function syncPlateSubscription() {
-  const topic = plateTopic();
-  if (subscribedPlateTopic && subscribedPlateTopic !== topic) {
-    mqttClient.unsubscribe(subscribedPlateTopic);
-  }
-  subscribedPlateTopic = topic;
-  mqttClient.subscribe(topic, { qos: 1 });
+  const topics = [plateTopic(), plateImageTopic()];
+  const stale = subscribedPlateTopics.filter((t) => !topics.includes(t));
+  if (stale.length) mqttClient.unsubscribe(stale);
+  subscribedPlateTopics = topics;
+  mqttClient.subscribe(topics, { qos: 1 });
 }
 
 function validTurns(v) {
@@ -310,6 +313,11 @@ function onMqttMessage(topic, message, packet) {
     cycle.onPlate(number || null);
     return;
   }
+  if (topic === plateImageTopic()) {
+    const file = path.basename(message.toString().trim());
+    if (file) io.emit("dev_plate_image", { camera: settings.camId, file, url: `/api/plate-captures/${file}` });
+    return;
+  }
   const parts = topic.split("/");
   if (parts.length !== 2 || parts[1] !== "state") return;
 
@@ -345,6 +353,7 @@ function readerEnv() {
     DEV_PLATE_DIGITS: String(settings.plateDigits),
     DEV_PLATE_FRAMES: String(settings.plateFrames),
     DEV_PLATE_DEBUG: settings.debugDir || "",
+    DEV_PLATE_CAPTURES: CAPTURES_DIR,
   };
   if (settings.roi) {
     env.DEV_PLATE_ROI = [settings.roi.x, settings.roi.y, settings.roi.w, settings.roi.h].join(",");
@@ -482,7 +491,8 @@ function registerSocket(socket) {
     "dev_capture_plate",
     () => {
       if (!enabled) throw new Error("dev_mode is off");
-      mqttClient.publish(triggerTopic(), "start", COMMAND_OPTS);
+      // "capture" = زي "start" بس القارئ بيحفظ الصورة قبل الـ OCR
+      mqttClient.publish(triggerTopic(), "capture", COMMAND_OPTS);
     },
     { auth: true }
   );
@@ -531,4 +541,4 @@ function registerSocket(socket) {
   cycle.registerSocket(socket, on);
 }
 
-module.exports = { init, registerSocket, MAX_TURNS };
+module.exports = { init, registerSocket, MAX_TURNS, CAPTURES_DIR };

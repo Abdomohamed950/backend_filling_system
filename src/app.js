@@ -13,6 +13,7 @@ const receiptsRoutes = require("./routes/receiptsRoutes");
 const trucksRoutes = require("./routes/trucksRoutes");
 const { attachUser, AUTH_REQUIRED } = require("./middleware/auth");
 const db = require("./config/database");
+const { CAPTURES_DIR } = require("./services/devMode");
 const Session = require("./models/sessionModel");
 const SyncSettings = require("./models/syncSettingsModel");
 
@@ -44,6 +45,9 @@ app.use(express.urlencoded({ extended: true }));
 // يتحقق من التوكن إن وُجد ويضع req.user — الفرض الكامل بـ AUTH_REQUIRED=true
 app.use(attachUser);
 console.log(`🔐 Auth: ${AUTH_REQUIRED ? "مفروضة على مسارات التعديل" : "اختيارية (AUTH_REQUIRED=false)"}`);
+
+// صور "جرّب القراءة" في dev_mode (بتتحفظ قبل الـ OCR)
+app.use("/api/plate-captures", express.static(CAPTURES_DIR));
 
 // Routes
 app.use("/api", authRoutes);
