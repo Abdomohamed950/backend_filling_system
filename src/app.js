@@ -9,6 +9,7 @@ const historyRoutes = require("./routes/historyRoutes");
 const reportRoutes = require("./routes/reportRoutes");
 const syncSettingsRoutes = require("./routes/syncSettingsRoutes");
 const scadaChannelsRoutes = require("./routes/scadaChannelsRoutes");
+const scadaServersRoutes = require("./routes/scadaServersRoutes");
 const receiptsRoutes = require("./routes/receiptsRoutes");
 const trucksRoutes = require("./routes/trucksRoutes");
 const { attachUser, AUTH_REQUIRED } = require("./middleware/auth");
@@ -57,6 +58,7 @@ app.use("/api", historyRoutes);
 app.use("/api", reportRoutes);
 app.use("/api", syncSettingsRoutes);
 app.use("/api", scadaChannelsRoutes);
+app.use("/api", scadaServersRoutes);
 app.use("/api", receiptsRoutes);
 app.use("/api", trucksRoutes);
 

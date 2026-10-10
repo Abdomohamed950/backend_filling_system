@@ -10,6 +10,7 @@ const { resolveOperator, AUTH_REQUIRED } = require("../middleware/auth");
 const barcodeFlow = require("../services/barcodeFlow");
 const receiptSync = require("../services/receiptSync");
 const devMode = require("../services/devMode");
+const scadaResync = require("../services/scadaResync");
 const Trucks = require("../models/trucksModel");
 
 const AI_SCRIPT = path.join(__dirname, "..", "utils", "ai", "app.py");
@@ -19,6 +20,12 @@ const AI_CWD = path.join(__dirname, "..");
 // حالة التشغيل الذكي مشتركة بين كل العملاء (كانت لكل socket على حدة)
 let aiModeProcess = null;
 let aiModeRunning = false;
+// نفس الـ broadcast + إبلاغ dev_mode عشان loop الدورة التلقائية
+function setAiStatus(running) {
+  devMode.setAiMode(running);
+  ioRef.emit("ai_mode_status", { running });
+}
+let ioRef = null;
 
 function socket_setup(mqttClient, server) {
   const io = new Server(server, {
@@ -28,7 +35,9 @@ function socket_setup(mqttClient, server) {
     },
   });
 
+  ioRef = io;
   devMode.init(mqttClient, io);
+  scadaResync.init(io);
 
   function replay(socket, events, label) {
     for (const [event, payload] of events) socket.emit(event, payload);
@@ -201,7 +210,7 @@ function socket_setup(mqttClient, server) {
         aiModeRunning = false;
 
         // ابعت لكل الأجهزة الحالة الجديدة
-        io.emit("ai_mode_status", { running: false });
+        setAiStatus(false);
         return;
       }
 
@@ -222,7 +231,7 @@ function socket_setup(mqttClient, server) {
         console.error(`❌ AI mode failed to start: ${err.message}`);
         aiModeProcess = null;
         aiModeRunning = false;
-        io.emit("ai_mode_status", { running: false });
+        setAiStatus(false);
       });
 
       aiModeProcess.on("close", (code) => {
@@ -231,11 +240,11 @@ function socket_setup(mqttClient, server) {
         aiModeRunning = false;
 
         // برودكاست الحالة بعد الإيقاف
-        io.emit("ai_mode_status", { running: false });
+        setAiStatus(false);
       });
 
       // برودكاست الحالة بعد التشغيل
-      io.emit("ai_mode_status", { running: true });
+      setAiStatus(true);
     });
 
     socket.on("disconnect", () => {

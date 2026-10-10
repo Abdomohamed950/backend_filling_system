@@ -122,6 +122,27 @@ const DDL = [
      updatedAt             TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
    )`,
 
+  // سيرفرات SCADA (أكتر من واحد بالتوازي) — بتحل محل أعمدة scada* في sync_settings
+  `CREATE TABLE IF NOT EXISTS scada_servers (
+     id        INTEGER PRIMARY KEY AUTOINCREMENT,
+     name      TEXT,
+     host      TEXT    NOT NULL,
+     port      INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+     enabled   INTEGER NOT NULL DEFAULT 1,
+     createdAt TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+     updatedAt TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+   )`,
+
+  // حالة المزامنة لكل (سجل، سيرفر): row_id/flow_id بتختلف من سيرفر للتاني
+  `CREATE TABLE IF NOT EXISTS scada_sync_state (
+     historyId INTEGER NOT NULL REFERENCES history(id)       ON DELETE CASCADE,
+     serverId  INTEGER NOT NULL REFERENCES scada_servers(id) ON DELETE CASCADE,
+     rowId     TEXT,
+     flowId    TEXT,
+     synced    INTEGER NOT NULL DEFAULT 0,
+     PRIMARY KEY (historyId, serverId)
+   )`,
+
   // خرائط قنوات SCADA لكل منفذ (channel id لكل حقل يُبعت بروتوكول P عليه)
   `CREATE TABLE IF NOT EXISTS scada_channels (
      id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,7 +168,7 @@ const DDL = [
    )`,
 ];
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /*
  * "CREATE TABLE IF NOT EXISTS" لا يضيف عمودًا جديدًا لجدول موجود بالفعل —
@@ -169,6 +190,7 @@ function addColumnIfMissing(db, table, column, ddlType) {
 }
 
 function migrate(db) {
+  const prevVersion = db.pragma("user_version", { simple: true });
   db.exec("BEGIN");
   try {
     for (const stmt of DDL) db.exec(stmt);
@@ -185,6 +207,21 @@ function migrate(db) {
     // v6: إعدادات وضع pulse (litersPerPulse = لتر/نبضة، thirdCloseLag = تأخير القفل الثالث)
     addColumnIfMissing(db, "ports_setting", "litersPerPulse", "REAL");
     addColumnIfMissing(db, "ports_setting", "thirdCloseLag", "INTEGER NOT NULL DEFAULT 0");
+
+    // v7: سيرفر SCADA الوحيد القديم (sync_settings) يتنقل مرة واحدة لـ scada_servers
+    // مع حالة مزامنة سجلاته (أعمدة scada* القديمة بتفضل من غير ما تتقرأ بعد كده)
+    if (prevVersion < 7) {
+      const old = db.prepare("SELECT scadaEnabled, scadaHost, scadaPort FROM sync_settings WHERE id = 1").get();
+      if (old && String(old.scadaHost || "").trim() && old.scadaPort) {
+        const { lastInsertRowid } = db
+          .prepare("INSERT INTO scada_servers (name, host, port, enabled) VALUES (?, ?, ?, ?)")
+          .run(null, String(old.scadaHost).trim(), Number(old.scadaPort), old.scadaEnabled ? 1 : 0);
+        db.prepare(
+          `INSERT OR IGNORE INTO scada_sync_state (historyId, serverId, rowId, flowId, synced)
+           SELECT id, ?, scadaRowId, scadaFlowId, CASE WHEN scadaSynced = 1 THEN 1 ELSE 0 END FROM history`
+        ).run(lastInsertRowid);
+      }
+    }
 
     // v5: جدول الشاحنات كان dev_mode_trucks في أول نسخة من dev_mode
     const legacy = db

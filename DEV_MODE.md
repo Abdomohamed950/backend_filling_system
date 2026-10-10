@@ -92,6 +92,7 @@
 | `roi` | object \| null | `null` | `{x,y,w,h}` كنسب 0..1، و`x+w ≤ 1` و`y+h ≤ 1` | المربع اللي القراءة بتتركز عليه (شاشة العربية بس). `null` = الصورة كلها |
 | `debugDir` | string | `""` | — | لو متحدد، القارئ بيحفظ الفريمات في المجلد ده للمعايرة |
 | `arriveWaitMs` | int | `5000` | 0–60000 | في الدورة: انتظار وصول العربية تحت المنفذ قبل قراءة الرقم. حركة الـ stepper بتاخد وقت (حوالي 0.8 ثانية للفّة) فزوّده لو القراءة بتتم قبل ما العربية توصل |
+| `loopDelaySec` | number | `10` | 0–3600 | في loop الـ AI mode: الانتظار بين `done` والدورة الجديدة على نفس المنفذ (قسم 2.4). التغيير بيسري من الانتظار الجاي (الانتظار الجاري بيكمل بقيمته) |
 | `defaultQuantity` | number | `10` | `0 < q < 100` | الكمية الثابتة في الدورة لشاحنة مش مسجّلة أو مالهاش كمية خاصة |
 
 - الإعدادات بتتحفظ في قاعدة البيانات (بتفضل بعد إعادة تشغيل السيرفر).
@@ -111,7 +112,7 @@
 
 | الاتجاه | Event | Payload |
 |---|---|---|
-| UI → Server | `dev_start_cycle` | `{ port }` — الزرار (يظهر في dev_mode فقط) |
+| UI → Server | `dev_start_cycle` | `{ port, receipt_number? }` — الزرار (يظهر في dev_mode فقط). `receipt_number` اختياري (سيريال الباركود المتمسح)، للتسجيل في `history` فقط من غير أي تحقق |
 | UI → Server | `dev_cancel_cycle` | `{ port }` — بيوقف التعبئة لو شغالة وبيطلّع العربية، من غير ما يعد نقلة |
 | Server → كل العملاء | `dev_cycle` | `{ port, phase, ...extra }` |
 
@@ -126,6 +127,7 @@
 | `filled` | التعبئة خلصت بـ `stop` (أو `cancelled` / `aborted` لو إلغاء/طوارئ). عدّ النقلة بيحصل بعد ما العداد يستقر ويجيلك `truck_updated` | `plate` |
 | `leaving` | العربية بتخرج (`stopTurns` ثم `homeTurns`) | |
 | `done` | الدورة خلصت، المنفذ جاهز لدورة جديدة | |
+| `waiting` | (في loop الـ AI mode بس) بعد `done`، انتظار `loopDelaySec` قبل دورة جديدة بتبدأ بـ `moving` | `nextInMs` |
 | `blocked` | فشل، ومفيش تعبئة. العربية بتخرج بعدها (`leaving` ← `done`) | `reason` |
 
 أسباب `blocked`:
@@ -140,7 +142,13 @@
 
 شروط البدء (غير كده بيرجع `dev_error`): dev_mode شغال، المنفذ `online` وفاضي (مش `filling`/`stoping`)، مفيش دورة تانية على نفس المنفذ، ومفيش دورة تانية بتقرأ رقم دلوقتي (الكاميرا واحدة).
 
-التعبئة نفسها بتمشي في نفس مسار `start_filling` العادي، فالسجل بيتكتب في `history` بـ `truckNum` = الرقم المقروء و`requiredQuantity` = الكمية و`receiptNum` فاضي و`fillMode = normal`.
+التعبئة نفسها بتمشي في نفس مسار `start_filling` العادي، فالسجل بيتكتب في `history` بـ `truckNum` = الرقم المقروء و`requiredQuantity` = الكمية و`receiptNum` = السيريال المبعوت في `dev_start_cycle` (أو فاضي لو الزرار اتضغط من غير سيريال) و`fillMode = normal`. السيريال للتسجيل فقط: مفيش `check_receipt` ولا ربط بكمية أو شاحنة. ولو اتبعت، بيتضمّن كـ `receipt_number` في كل أحداث `dev_cycle`.
+
+**loop الـ AI mode:** لما AI mode (`ai_mode_status {running: true}`، بيتبدّل بـ `toggle_ai_mode`) **و**dev_mode شغالين، السيرفر بيكرر الدورة التلقائية على كل منافذ `ports_setting` بنفس مسار `dev_start_cycle` الداخلي (من غير باركود، فـ `receiptNum` فاضي):
+- بعد `done` بيبعت `waiting {nextInMs}` وبعد `loopDelaySec` بيبدأ دورة جديدة على نفس المنفذ. `blocked` (مثلًا `read_failed`) بيكمل بنفس الشكل، ما عدا `trips_exhausted`: بيوقف الـ loop على المنفذ ده ويبعت `dev_error {event: "dev_cycle_loop", port, message}` لكل العملاء.
+- التتابع: الكاميرا واحدة، فلو منفذ تاني بيقرأ رقم، الـ loop بيعيد المحاولة كل ثانية. لو المنفذ مش `online` أو مشغول، بيعيد المحاولة كل `loopDelaySec` (ثانية على الأقل).
+- بيقف فورًا (وبيلغي الانتظار المعلّق) لما: AI mode يتقفل، أو dev_mode يتقفل، أو `dev_cancel_cycle` على المنفذ (بيوقف الـ loop على المنفذ ده فقط)، أو السيرفر يعيد التشغيل (الحالة في الذاكرة). الدورة الشغالة وقت إغلاق AI mode بتكمل لحد `done` ومبتبدأش بعدها دورة.
+- شغال داخل dev_mode فقط؛ التشغيل العادي وAI mode خارجه ما يتأثرش.
 
 ### 2.5 الأخطاء والصلاحيات
 
@@ -206,7 +214,7 @@ pulse,<litersPerPulse>,<firstCloseTime>,<secondCloseTime>,<firstCloseLag>,<Secon
 
 - [ ] زرار/مفتاح "Dev Mode" يبعت `dev_mode {enabled}` ويعرض الحالة من `dev_mode_status` (مش من الحالة المحلية).
 - [ ] لما `dev_mode_status.enabled === false` اخفي كل اللي تحت. السيرفر أصلًا بيرفض الأوامر وهو مقفول.
-- [ ] **زرار "ابدأ الدورة"** لكل منفذ (يظهر في dev_mode فقط) يبعت `dev_start_cycle {port}`، وزرار "إلغاء" يبعت `dev_cancel_cycle`. اعرض `dev_cycle.phase` و`reason` لو `blocked`.
+- [ ] **زرار "ابدأ الدورة"** لكل منفذ (يظهر في dev_mode فقط) يبعت `dev_start_cycle {port, receipt_number?}`، وزرار "إلغاء" يبعت `dev_cancel_cycle`. اعرض `dev_cycle.phase` و`reason` لو `blocked`.
 - [ ] شاشة إعدادات dev_mode:
   - [ ] جدول المنافذ: لكل منفذ `readyTurns` / `stopTurns` / `homeTurns` (0–6.6)، حفظ بـ `dev_set_turns`، تحميل بـ `dev_get_turns`، وزرار "تحريك" بيبعت `dev_move`.
   - [ ] إعدادات الكاميرا والدورة (قسم 2.3): الكاميرا والـ ROI والخانات والفريمات و`arriveWaitMs` و`defaultQuantity` + زرار "جرّب القراءة".
@@ -224,7 +232,7 @@ pulse,<litersPerPulse>,<firstCloseTime>,<secondCloseTime>,<firstCloseLag>,<Secon
 ### 4.1 الدورة التلقائية (زرار الواجهة)
 
 ```
-[الواجهة] dev_start_cycle {port}
+[الواجهة] dev_start_cycle {port, receipt_number?}
    ▼
 [السيرفر] يتأكد: dev_mode شغال، المنفذ online وفاضي
    │ publish  <port>/turns = readyTurns          ← العربية تتحرك تحت المنفذ   (moving)

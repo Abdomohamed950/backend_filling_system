@@ -182,4 +182,27 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-module.exports = { ScadaClient };
+/**
+ * فحص اتصال TCP بس (من غير ما نبعت أي رسالة بروتوكول ولا نمس الـ client الرئيسي).
+ * بيرجع { reachable, latencyMs, error? } ومبيرميش استثناء.
+ */
+function testConnection(host, port, timeout = 3000) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = new net.Socket();
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeout);
+    socket.once("connect", () => finish({ reachable: true, latencyMs: Date.now() - started }));
+    socket.once("timeout", () => finish({ reachable: false, error: `timeout after ${timeout}ms` }));
+    socket.once("error", (err) => finish({ reachable: false, error: err.code || err.message }));
+    socket.connect(port, host);
+  });
+}
+
+module.exports = { ScadaClient, testConnection };

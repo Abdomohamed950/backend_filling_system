@@ -67,6 +67,7 @@ let enabled = false;
 let tableReady = false;
 let plateProc = null;
 let cycle = null;
+let aiModeRunning = false;
 
 // صور "جرّب القراءة" (بتتحفظ قبل الـ OCR) — بتتخدم من app.js على /api/plate-captures
 const CAPTURES_DIR = path.join(__dirname, "..", "..", "data", "plate_captures");
@@ -83,6 +84,7 @@ const SETTINGS_DEFAULTS = {
   debugDir: "",
   defaultQuantity: 10, // الكمية الثابتة لشاحنة مالهاش كمية خاصة (0 < q < 100)
   arriveWaitMs: 5000, // انتظار وصول العربية تحت المنفذ قبل قراءة الرقم
+  loopDelaySec: 10, // انتظار بين دورتين في loop الـ AI mode (ثواني)
 };
 let settings = { ...SETTINGS_DEFAULTS };
 let subscribedPlateTopics = [];
@@ -172,6 +174,13 @@ async function saveSettings(patch) {
     next.defaultQuantity = q;
   }
   if (patch.arriveWaitMs !== undefined) next.arriveWaitMs = intIn(patch.arriveWaitMs, 0, 60000, "arriveWaitMs");
+  if (patch.loopDelaySec !== undefined) {
+    const n = Number(patch.loopDelaySec);
+    if (patch.loopDelaySec === null || patch.loopDelaySec === "" || !Number.isFinite(n) || n < 0 || n > 3600) {
+      throw new Error("loopDelaySec must be a number between 0 and 3600");
+    }
+    next.loopDelaySec = n;
+  }
   await db.query(
     `INSERT INTO dev_mode_settings (id, json) VALUES (1, $1)
      ON CONFLICT(id) DO UPDATE SET json = excluded.json`,
@@ -406,6 +415,13 @@ async function setEnabled(value) {
   console.log(`🧪 dev_mode ${enabled ? "ON" : "OFF"}`);
   io.emit("dev_mode_status", { enabled });
   if (enabled) publishAllReady().catch((err) => console.error("❌ dev_mode turns_ready:", err.message));
+  cycle.syncLoop(); // AI mode شغال قبل dev_mode: ابدأ الـ loop
+}
+
+// من transport/socket.js كل ما حالة AI mode تتغيّر
+function setAiMode(running) {
+  aiModeRunning = Boolean(running);
+  if (cycle) cycle.syncLoop(aiModeRunning);
 }
 
 function init(client, ioInstance) {
@@ -413,6 +429,7 @@ function init(client, ioInstance) {
   io = ioInstance;
   cycle = devCycle.create({
     getMqtt: () => mqttClient,
+    listPorts: async () => (await db.query(`SELECT name FROM ports_setting ORDER BY name`)).rows.map((r) => r.name),
     io,
     isEnabled: () => enabled,
     getSettings: () => settings,
@@ -541,4 +558,4 @@ function registerSocket(socket) {
   cycle.registerSocket(socket, on);
 }
 
-module.exports = { init, registerSocket, MAX_TURNS, CAPTURES_DIR };
+module.exports = { init, registerSocket, setAiMode, MAX_TURNS, CAPTURES_DIR };
