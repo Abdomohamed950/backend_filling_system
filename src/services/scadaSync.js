@@ -36,9 +36,26 @@ const label = (server) => `${server.name ? server.name + " " : ""}${server.host}
 
 const isNumeric = (v) => typeof v === "string" && /^\d+$/.test(v);
 
-/** يبني "P <ch> <value> <rowOrFlow>\n" — القيمة الأخيرة "null" لو مفيش ربط */
+/**
+ * قيم الأوقات بتتبعت بصيغة SCADA 'YYYY-MM-DD,HH:MM:SS' (فاصلة بدل المسافة):
+ * الرسالة مقسّمة بالمسافات، فمسافة جوه التاريخ كانت بتفسد القيمة والـ row_id.
+ */
+const scadaTime = (stamp) => (stamp == null ? stamp : String(stamp).trim().replace(" ", ","));
+
+/**
+ * يبني رسالة P:
+ *  - حقل عادي مربوط بسجل:  "P <ch> <value> <row_id>\n"
+ *  - قراءة العداد:          "P <ch> <value> null null\n"   (buildFlowMessage(ch, v, null))
+ *  - وقت قراءة العداد:      "P <ch> <time> null <flow_id>\n" (buildFlowMessage(ch, t, flowId))
+ * القيمة الأخيرة "null" لو مفيش ربط.
+ */
 function buildMessage(channel, value, linkId) {
   return `P ${channel} ${value ?? "null"} ${linkId ?? "null"}\n`;
+}
+
+/** رسائل العداد: الصيغة بـ 5 أجزاء (row_id دايمًا null، وflow_id لوقت القراءة بس) */
+function buildFlowMessage(channel, value, flowId) {
+  return `P ${channel} ${value ?? "null"} null ${flowId ?? "null"}\n`;
 }
 
 // ---- حالة المزامنة لكل (سجل، سيرفر) ----
@@ -94,7 +111,7 @@ async function startOnServer(server, history, channels) {
     [channels.operatorCh, history.operatorId],
     [channels.requiredCh, history.requiredQuantity],
     [channels.receiptCh, history.receiptNum],
-    [channels.inTimeCh, history.entryTime],
+    [channels.inTimeCh, scadaTime(history.entryTime)],
   ];
   for (const [ch, value] of sequential) {
     if (!ch || value === null || value === undefined || value === "") continue;
@@ -103,12 +120,12 @@ async function startOnServer(server, history, channels) {
 
   if (channels.flowmeterCh && history.startMeter !== null) {
     const flowId = await scada.sendReceive(
-      buildMessage(channels.flowmeterCh, history.startMeter, null)
+      buildFlowMessage(channels.flowmeterCh, history.startMeter, null)
     );
     if (flowId && isNumeric(flowId)) {
       await setFlowId(historyId, server.id, flowId);
       if (channels.flowTimeCh) {
-        await scada.sendReceive(buildMessage(channels.flowTimeCh, history.entryTime, flowId));
+        await scada.sendReceive(buildFlowMessage(channels.flowTimeCh, scadaTime(history.entryTime), flowId));
       }
     } else {
       console.error(`❌ SCADA ${label(server)}: رد flow_id غير صالح (${flowId}) للسجل #${historyId}`);
@@ -136,18 +153,18 @@ async function endOnServer(server, history, channels) {
     await scada.sendReceive(buildMessage(channels.actualCh, history.actualQuantity, rowId));
   }
   if (channels.outTimeCh && history.exitTime) {
-    await scada.sendReceive(buildMessage(channels.outTimeCh, history.exitTime, rowId));
+    await scada.sendReceive(buildMessage(channels.outTimeCh, scadaTime(history.exitTime), rowId));
   }
 
   if (channels.flowmeterCh && history.endMeter !== null) {
     const flowId = await scada.sendReceive(
-      buildMessage(channels.flowmeterCh, history.endMeter, null)
+      buildFlowMessage(channels.flowmeterCh, history.endMeter, null)
     );
     if (flowId && isNumeric(flowId)) {
       await setFlowId(historyId, server.id, flowId);
       if (channels.flowTimeCh) {
         await scada.sendReceive(
-          buildMessage(channels.flowTimeCh, history.exitTime || nowStamp(), flowId)
+          buildFlowMessage(channels.flowTimeCh, scadaTime(history.exitTime || nowStamp()), flowId)
         );
       }
     } else {

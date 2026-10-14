@@ -90,27 +90,31 @@ function finish(j, status, message) {
   j.cleanup.unref?.();
 }
 
-/** حذف قراءات الفترة من السيرفر قبل الإرسال (مرة واحدة، وبس لو فيه سجلات) */
+/** حذف قراءات الفترة من السيرفر قبل الإرسال (مرة واحدة، حتى لو مفيش سجلات) */
 async function deleteBefore(j, server) {
   emit(j, true);
+  // القناة المطلوبة في الأمر = قناة رقم العربية (truckCh) لكل بورت، من غير تكرار
+  const channels = [...new Set((await ScadaChannels.findAll()).map((c) => c.truckCh).filter(Boolean))];
+  if (!channels.length) throw new Error("no truck channels configured in /scada-channels");
   const client = scadaSync.getClient(server);
   if (!(await client.connect())) throw new Error(`server ${scadaSync.label(server)} is unreachable`);
-  const reply = await scadaDelete.deleteReadings(client, j.from, j.to);
-  console.log(`🗑️  SCADA resync ${scadaSync.label(server)}: اتمسحت قراءات ${j.from} → ${j.to} (رد: ${reply})`);
+  const { sent, acked } = await scadaDelete.deleteReadings(client, j.from, j.to, channels);
+  console.log(
+    `🗑️  SCADA resync ${scadaSync.label(server)}: أوامر الحذف ${j.from} → ${j.to} (قنوات: ${sent.join(", ")}، ack: ${acked}/${sent.length})`
+  );
 }
 
 async function run(j, ids) {
-  if (ids.length) {
-    const first = (await db.query("SELECT * FROM scada_servers WHERE id = $1", [j.serverId])).rows[0];
-    if (!first) return finish(j, "failed", "server was deleted");
-    try {
-      await deleteBefore(j, first);
-    } catch (err) {
-      // فشل الحذف = مفيش إرسال خالص (عشان ما يحصلش تكرار)
-      return finish(j, "failed", `delete before resync failed: ${err.message}`);
-    }
-    if (j.cancelled) return finish(j, "cancelled");
+  // الحذف دايمًا بيحصل، حتى لو مفيش سجلات محلية في الفترة (total = 0)
+  const first = (await db.query("SELECT * FROM scada_servers WHERE id = $1", [j.serverId])).rows[0];
+  if (!first) return finish(j, "failed", "server was deleted");
+  try {
+    await deleteBefore(j, first);
+  } catch (err) {
+    // فشل الحذف = مفيش إرسال خالص (عشان ما يحصلش تكرار)
+    return finish(j, "failed", `delete before resync failed: ${err.message}`);
   }
+  if (j.cancelled) return finish(j, "cancelled");
   j.phase = "sending";
   emit(j, true);
   let unreachableSince = 0;
