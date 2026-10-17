@@ -1130,13 +1130,16 @@ void handleEncoderActions() {
 
       u8g2.sendBuffer();
     } else {
-      // Flow rate (row 0, truck id sits at column 15)
+      // Row 0: flow rate, then truck id (right-aligned before N/M), N/M at columns 18-19
       String rate = String("Rate:") + String(flow_rate_value, 1);
+      String id = String(truck_id);
       lcd.setCursor(0, 0);
       lcd.print(rate);
-      for (int i = rate.length(); i < 15; i++) {
+      for (int i = rate.length(); i < 18 - (int)id.length(); i++) {
         lcd.print(" ");
       }
+      lcd.print(id);
+      drawStatusLcd();
 
       // manual mode
       lcd.setCursor(0, 1);
