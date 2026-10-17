@@ -161,6 +161,12 @@ const port = {
 
   // حذف منفذ
   delete: async (id) => {
+    // scada_channels.portNum يشير لـ ports_setting(name) بدون ON DELETE،
+    // فمسح منفذ له خريطة قنوات كان بيفشل بـ FOREIGN KEY constraint
+    await db.query(
+      "DELETE FROM scada_channels WHERE portNum = (SELECT name FROM ports_setting WHERE id = $1)",
+      [id]
+    );
     const result = await db.query(
       "DELETE FROM ports_setting WHERE id = $1 RETURNING *",
       [id]
