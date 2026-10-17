@@ -5,12 +5,11 @@
 #include <ESP8266WebServer.h>
 
 // ===== Pins (adjust to your board) =====
-#define pumb1start D1
-#define pumb1stop D2
-#define pumb2start D5
-#define pumb2stop D6
-#define port1 D7
-#define port2 D8
+// One relay per pump (active-LOW): 0 = pump ON, 1 = pump OFF
+#define pump1Pin D1
+#define pump2Pin D5
+#define PUMP_ON HIGH
+#define PUMP_OFF LOW
 
 // ===== Defaults (will be overridden by saved values) =====
 String WIFI_SSID_DEFAULT = "Abdo123";             // value1 (user name)
@@ -67,7 +66,7 @@ const uint8_t MAX_PORTS = 8;
 float recentFlow[MAX_PORTS] = {0};
 bool portsActive = false;
 bool pump1Running = false;
-bool pump2Running = false;
+bool pump2Active = false;
 int active;
 
 // Wait time before restarting after a pump2 -> pump1 downgrade (non-blocking)
@@ -78,14 +77,6 @@ unsigned long restartWaitSince = 0;
 unsigned long lastPortsChange = 0;
 int lastActiveCount = 0;
 bool pendingPump1Stop = false;
-
-// MQTT reconnect backoff variables
-unsigned long lastReconnectAttempt = 0;
-const unsigned long RECONNECT_INTERVAL_MS = 5000;
-unsigned long reconnectIntervalMs = RECONNECT_INTERVAL_MS; // backoff interval
-const unsigned long MAX_RECONNECT_INTERVAL_MS = 30000;
-unsigned long reconnectPauseUntilMs = 0; // pause window after too many failures
-uint8_t reconnectFailures = 0;           // consecutive failures
 
 // Pump2 dwell timers
 bool lowNow = false;
@@ -216,27 +207,8 @@ void handleFormSubmit()
 }
 
 // ===== WiFi =====
-// هذا التعديل يجعل connectWiFi غير متزامنة (non-blocking) ولا تعطل الكود
-// عند كل دورة loop، تنادي connectWiFiLoop() بدل connectWiFi() مباشرة
-
-enum WiFiConnectState {
-  WIFI_IDLE,
-  WIFI_STARTED,
-  WIFI_CONNECTING,
-  WIFI_DONE,
-  WIFI_FAILED
-};
-
-WiFiConnectState wifiState = WIFI_IDLE;
-unsigned long wifiStartTime = 0;
-unsigned long wifiLastAttempt = 0;
-int wifiTries = 0;
-unsigned long wifiConnectDuration = 0;
-
-void connectWiFiStart() {
-  wifiTries = 0;
-  wifiStartTime = millis();
-
+void connectWiFi()
+{
   // try to apply static IP if provided
   if (ui_ip.length() > 0 && ui_gw.length() > 0 && ui_sn.length() > 0)
   {
@@ -247,139 +219,85 @@ void connectWiFiStart() {
     WiFi.config(ip, gw, sn);
   }
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ui_user.c_str(), ui_pass.c_str());
+  WiFi.begin(ui_user.c_str(), ui_pass.c_str()); // value1/value2
   Serial.print("Connecting WiFi");
-  wifiLastAttempt = millis();
-  wifiState = WIFI_CONNECTING;
-}
-
-void connectWiFiLoop() {
-  if (wifiState == WIFI_IDLE || wifiState == WIFI_DONE) {
-    // لم يبدأ اتصال أو تم بالفعل، لا شيء مطلوب
-    return;
+  int tries = 0;
+  while (WiFi.status() != WL_CONNECTED && tries < 40)
+  {
+    delay(250);
+    Serial.print(".");
+    tries++;
   }
-  if (wifiState == WIFI_CONNECTING) {
-    // تحقق إذا تم الاتصال أو انتهت المحاولات
-    if (WiFi.status() == WL_CONNECTED) {
-      wifiConnectDuration = millis() - wifiStartTime;
-      Serial.println(" OK");
-      Serial.print("WiFi connect time (ms): ");
-      Serial.println(wifiConnectDuration);
-      wifiState = WIFI_DONE;
-    }
-    else if (wifiTries >= 40) {
-      wifiConnectDuration = millis() - wifiStartTime;
-      Serial.println(" FAILED");
-      Serial.print("WiFi connect time (ms): ");
-      Serial.println(wifiConnectDuration);
-      wifiState = WIFI_FAILED;
-      startAPFallback();
-    }
-    else if (millis() - wifiLastAttempt >= 250) {
-      Serial.print(".");
-      wifiTries++;
-      wifiLastAttempt = millis();
-    }
-  }
+  bool ok = (WiFi.status() == WL_CONNECTED);
+  Serial.println(ok ? " OK" : " FAILED");
+  if (!ok)
+    startAPFallback();
 }
 
-bool isWiFiConnected() {
-  return (wifiState == WIFI_DONE && WiFi.status() == WL_CONNECTED);
-}
-
-// لتشغيل الاتصال:
-// connectWiFiStart(); مرة واحدة فقط (عند البدء أو عند فقدان الاتصال)
-// connectWiFiLoop(); في loop()
-// لمعرفة الوقت المستغرق من آخر محاولة: wifiConnectDuration بالميلي ثانية (ms)
-
-bool connectToMQTT()
+void connectToMQTT()
 {
   client.setServer(ui_mqtt.c_str(), 1883);
-  client.setKeepAlive(10);
-  client.setSocketTimeout(2);
-  
-  String cid = "bumpbroker-" + String(ESP.getChipId(), HEX);
-  bool ok = client.connect(cid.c_str(), TOPIC_AVAIL, 1, true, "offline");
-  if (ok)
+  while (!client.connected() && WiFi.status() == WL_CONNECTED)
   {
-    client.publish(TOPIC_AVAIL, "online", true);
-    client.publish(TOPIC_THR_LOW_CUR, String(FLOW_LOW_START, 3).c_str(), true);
-    client.publish(TOPIC_THR_HIGH_CUR, String(FLOW_HIGH_STOP, 3).c_str(), true);
-    client.publish(TOPIC_PUMP2_ACTIVE_CUR, pump2Running ? "1" : "0", true);
-    client.publish(TOPIC_PUMP1_RUNNING_CUR, pump1Running ? "1" : "0", true);
-    return true;
-  }
-  return false;
-}
-
-void connectToMQTTLoop()
-{
-  if (!client.connected() && WiFi.status() == WL_CONNECTED)
-  {
-    unsigned long now = millis();
-    // لا نحاول أثناء pause window
-    if (now >= reconnectPauseUntilMs && (now - lastReconnectAttempt) > reconnectIntervalMs)
+    String cid = "bumpbroker-" + String(ESP.getChipId(), HEX);
+    bool ok = client.connect(cid.c_str(), TOPIC_AVAIL, 1, true, "offline");
+    if (ok)
     {
-      lastReconnectAttempt = now;
-      if (connectToMQTT())
-      {
-        reconnectFailures = 0;
-        reconnectIntervalMs = RECONNECT_INTERVAL_MS;
-      }
-      else
-      {
-        reconnectFailures++;
-        if (reconnectIntervalMs < MAX_RECONNECT_INTERVAL_MS)
-          reconnectIntervalMs = (reconnectIntervalMs * 2 <= MAX_RECONNECT_INTERVAL_MS) ? reconnectIntervalMs * 2 : MAX_RECONNECT_INTERVAL_MS;
-        if (reconnectFailures >= 5)
-        {
-          // إيقاف المحاولات لمدة دقيقة لعدم تعطيل الـ UI
-          reconnectPauseUntilMs = now + 60000;
-        }
-      }
+      client.publish(TOPIC_AVAIL, "online", true);
+      client.subscribe(TOPIC_PORTS_STATUS);
+      client.subscribe(TOPIC_PUMP_OVERRIDE);
+      client.subscribe(TOPIC_THR_LOW_SET);
+      client.subscribe(TOPIC_THR_HIGH_SET);
+      client.publish(TOPIC_THR_LOW_CUR, String(FLOW_LOW_START, 3).c_str(), true);
+      client.publish(TOPIC_THR_HIGH_CUR, String(FLOW_HIGH_STOP, 3).c_str(), true);
+      client.publish(TOPIC_PUMP2_ACTIVE_CUR, pump2Active ? "1" : "0", true);
+      client.publish(TOPIC_PUMP1_RUNNING_CUR, pump1Running ? "1" : "0", true);
+      break;
+    }
+    else
+    {
+      delay(1000);
     }
   }
 }
 
-// ===== Relay helpers (Latch logic) =====
+// ===== Relay helpers (single relay per pump: 0 = ON, 1 = OFF) =====
 void setPump1Start()
 {
-  // START active-HIGH pulse, STOP line stayed idle HIGH
-  digitalWrite(pumb1start, HIGH);
-  delay(2000);
-  digitalWrite(pumb1start, LOW);
+  digitalWrite(pump1Pin, PUMP_ON);
   pump1Running = true;
-  if (client.connected())
-  {
-    client.publish(TOPIC_PUMP1_RUNNING_CUR, "1", true);
-  }
+  client.publish(TOPIC_PUMP1_RUNNING_CUR, "1", true);
 }
 void setPump1StopAll()
 {
-  // STOP active-LOW pulse for both pumps
-  digitalWrite(pumb1stop, LOW);
-  digitalWrite(pumb2stop, LOW);
-  delay(2000);
-  digitalWrite(pumb1stop, HIGH);
-  digitalWrite(pumb2stop, HIGH);
+  digitalWrite(pump1Pin, PUMP_OFF);
+  digitalWrite(pump2Pin, PUMP_OFF);
   pump1Running = false;
-  pump2Running = false;
+  pump2Active = false;
   lowNow = false;
-  if (client.connected())
-  {
-    client.publish(TOPIC_PUMP1_RUNNING_CUR, "0", true);
-    client.publish(TOPIC_PUMP2_ACTIVE_CUR, "0", true);
-  }
+  client.publish(TOPIC_PUMP1_RUNNING_CUR, "0", true);
+  client.publish(TOPIC_PUMP2_ACTIVE_CUR, "0", true);
 }
 void setPump2Start()
 {
-  digitalWrite(pumb2start, HIGH);
-  delay(2000);
-  digitalWrite(pumb2start, LOW);
-  pump2Running = true;
-  if (client.connected())
+  digitalWrite(pump2Pin, PUMP_ON);
+  pump2Active = true;
+  client.publish(TOPIC_PUMP2_ACTIVE_CUR, "1", true);
+}
+
+// ===== MQTT callback =====
+void mqttCallback(char *topic, byte *payload, unsigned int length)
+{
+  String t = String(topic);
+  String msg;
+  msg.reserve(length + 1);
+  for (unsigned int i = 0; i < length; i++)
+    msg += (char)payload[i];
+  msg.trim();
+
+  if (t == TOPIC_PORTS_STATUS)
   {
-    client.publish(TOPIC_PUMP2_ACTIVE_CUR, "1", true);
+    active = msg.toInt();
   }
 }
 
@@ -389,15 +307,11 @@ void setup()
   Serial.begin(115200);
   delay(50);
 
-  pinMode(pumb1start, OUTPUT);
-  pinMode(pumb1stop, OUTPUT);
-  pinMode(pumb2start, OUTPUT);
-  pinMode(pumb2stop, OUTPUT);
-  // Latch idle states
-  digitalWrite(pumb1start, LOW);
-  digitalWrite(pumb1stop, HIGH);
-  digitalWrite(pumb2start, LOW);
-  digitalWrite(pumb2stop, HIGH);
+  pinMode(pump1Pin, OUTPUT);
+  pinMode(pump2Pin, OUTPUT);
+  // Both pumps OFF at boot
+  digitalWrite(pump1Pin, PUMP_OFF);
+  digitalWrite(pump2Pin, PUMP_OFF);
 
   LittleFS.begin();
 
@@ -438,18 +352,9 @@ void setup()
   server.on("/submit", HTTP_POST, handleFormSubmit);
   server.begin();
 
-  connectWiFiStart();
-
-  // Wait for WiFi connection (non-blocking)
-  unsigned long wifiTimeout = millis() + 10000; // 10 seconds timeout
-  while (wifiState == WIFI_CONNECTING && millis() < wifiTimeout)
-  {
-    connectWiFiLoop();
-    server.handleClient();
-    delay(10);
-  }
-  
-  if (isWiFiConnected())
+  connectWiFi();
+  client.setCallback(mqttCallback);
+  if (WiFi.status() == WL_CONNECTED)
   {
     connectToMQTT();
   }
@@ -461,30 +366,23 @@ void loop()
 {
   if (!apMode)
   {
-    // WiFi connection handling (non-blocking)
-    if (WiFi.status() != WL_CONNECTED && wifiState != WIFI_CONNECTING)
+    if (WiFi.status() != WL_CONNECTED)
+      connectWiFi();
+    if (WiFi.status() == WL_CONNECTED)
     {
-      connectWiFiStart();
-    }
-    connectWiFiLoop();
-    
-    // MQTT connection handling (non-blocking with backoff)
-    if (isWiFiConnected())
-    {
-      connectToMQTTLoop();
+      if (!client.connected())
+        connectToMQTT();
       client.loop();
     }
   }
   server.handleClient();
-
-  active = digitalRead(port1) + digitalRead(port2);
 
   if (restartWait && millis() - restartWaitSince >= PUMP_RESTART_DELAY_MS)
     restartWait = false;
 
   if (!restartWait)
   {
-    if (active == 1 && pump2Running)
+    if (active == 1 && pump2Active)
     {
       // Active ports dropped from 2 to 1: stop everything, then wait before restarting
       setPump1StopAll();
@@ -495,7 +393,7 @@ void loop()
     {
       setPump1Start();
     }
-    else if (active > 1 && pump1Running && !pump2Running)
+    else if (active > 1 && pump1Running && !pump2Active)
     {
       setPump2Start();
     }
@@ -519,6 +417,6 @@ void loop()
     Serial.print(" | Pump1: ");
     Serial.print(pump1Running);
     Serial.print(" | Pump2: ");
-    Serial.println(pump2Running);
+    Serial.println(pump2Active);
   }
 }
