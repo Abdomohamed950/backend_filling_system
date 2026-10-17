@@ -640,6 +640,14 @@ void writeFile(const char *path, String message) {
 
 ESP8266WebServer server(80);
 
+// Row 0, cols 18-19: N = network (WiFi) connected, M = MQTT connected
+void drawStatusLcd() {
+  if (oled) return;
+  lcd.setCursor(18, 0);
+  lcd.print(WiFi.status() == WL_CONNECTED ? "N" : " ");
+  lcd.print(client.connected() ? "M" : " ");
+}
+
 void setup_wifi() {
 
   WiFi.config(local_IP, gateway, subnet, dns);
@@ -651,8 +659,7 @@ void setup_wifi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    lcd.setCursor(0, 0);
-    lcd.print("network");
+    drawStatusLcd();
   } else {
     startAPMode();
   }
@@ -887,9 +894,6 @@ void splitString(const String &str, char delimiter, String result[], int maxPart
 
 void reconnect() {
 
-  lcd.setCursor(8, 0);
-  lcd.print("    ");
-
   String availabilityTopicStr = String(truck_id) + "/availability";
   String clientIdStr = String("ESPTruckClient_") + truck_id;
   String quantityTopic = String(truck_id) + "/quantity";
@@ -905,8 +909,7 @@ void reconnect() {
   const char *willMessage = "offline";
 
   if (client.connect(clientIdStr.c_str(), willTopic, 1, true, willMessage)) {
-    lcd.setCursor(8, 0);
-    lcd.print("mqtt");
+    drawStatusLcd();
 
     client.publish(availabilityTopicStr.c_str(), "online", true);
     client.subscribe(quantityTopic.c_str());
@@ -982,9 +985,10 @@ void drawMenu_lcd() {
   lcd.print("]");
   // مسح باقي السطر (20 عمود)
   String row0 = String(currentMenuIndex == 0 ? ">" : " ") + String(quantity) + String(isBold[0] ? "*" : " ") + "[" + String(flow_meter_value) + "]";
-  for (int i = row0.length(); i < 20; i++) {
+  for (int i = row0.length(); i < 18; i++) {
     lcd.print(" ");
   }
+  drawStatusLcd();
 
   // **Start Row** - استخدام is_running بدل isBold
   lcd.setCursor(0, 1);
@@ -1367,13 +1371,16 @@ void handleEncoderActions() {
 
       u8g2.sendBuffer();
     } else {
-      // Flow rate (row 0, truck id sits at column 15)
+      // Row 0: flow rate, then truck id (right-aligned before N/M), N/M at columns 18-19
       String rate = String("Rate:") + String(flow_rate_value, 1);
+      String id = String(truck_id);
       lcd.setCursor(0, 0);
       lcd.print(rate);
-      for (int i = rate.length(); i < 15; i++) {
+      for (int i = rate.length(); i < 18 - (int)id.length(); i++) {
         lcd.print(" ");
       }
+      lcd.print(id);
+      drawStatusLcd();
 
       // manual mode
       lcd.setCursor(0, 1);
@@ -1856,9 +1863,6 @@ void setup() {
     subnet.fromString(esp_subnet);
 
     setup_wifi();
-    lcd.setCursor(15, 0);
-    lcd.print(String(truck_id));
-
     // Initialize pre-computed MQTT topics
     initMqttTopics();
 
