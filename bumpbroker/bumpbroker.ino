@@ -67,7 +67,11 @@ bool portsActive = false;
 bool pump1Running = false;
 bool pump2Active = false;
 int active;
-int block;
+
+// Wait time before restarting after a pump2 -> pump1 downgrade (non-blocking)
+const unsigned long PUMP_RESTART_DELAY_MS = 14000;
+bool restartWait = false;
+unsigned long restartWaitSince = 0;
 
 unsigned long lastPortsChange = 0;
 int lastActiveCount = 0;
@@ -229,17 +233,6 @@ void connectWiFi()
     startAPFallback();
 }
 
-void subscribePortState()
-{
-  for (uint8_t i = 1; i <= MAX_PORTS; i++)
-  {
-    String t = "port";
-    t += i;
-    t += "/valve_state";
-    client.subscribe(t.c_str());
-  }
-}
-
 void connectToMQTT()
 {
   client.setServer(ui_mqtt.c_str(), 1883);
@@ -254,8 +247,6 @@ void connectToMQTT()
       client.subscribe(TOPIC_PUMP_OVERRIDE);
       client.subscribe(TOPIC_THR_LOW_SET);
       client.subscribe(TOPIC_THR_HIGH_SET);
-      
-      subscribePortState();
       client.publish(TOPIC_THR_LOW_CUR, String(FLOW_LOW_START, 3).c_str(), true);
       client.publish(TOPIC_THR_HIGH_CUR, String(FLOW_HIGH_STOP, 3).c_str(), true);
       client.publish(TOPIC_PUMP2_ACTIVE_CUR, pump2Active ? "1" : "0", true);
@@ -315,16 +306,6 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
   if (t == TOPIC_PORTS_STATUS)
   {
     active = msg.toInt();
-  }
-
-  else if (t.endsWith("/valve_state") && msg == "lastclosing")
-  {
-    block = 1;
-    setPump1StopAll();
-  }
-  else if (t.endsWith("/valve_state") && msg == "close")
-  {
-    block = 0;
   }
 }
 
@@ -408,15 +389,29 @@ void loop()
   }
   server.handleClient();
 
-  if(!block)
+  if (restartWait && millis() - restartWaitSince >= PUMP_RESTART_DELAY_MS)
+    restartWait = false;
+
+  if (!restartWait)
   {
-    if (active == 1 && !pump1Running)
+    if (active == 1 && pump2Active)
+    {
+      // Active ports dropped from 2 to 1: stop everything, then wait before restarting
+      setPump1StopAll();
+      restartWait = true;
+      restartWaitSince = millis();
+    }
+    else if (active == 1 && !pump1Running)
     {
       setPump1Start();
     }
     else if (active > 1 && pump1Running && !pump2Active)
     {
       setPump2Start();
+    }
+    else if (active == 0 && pump1Running)
+    {
+      setPump1StopAll();
     }
   }
 
