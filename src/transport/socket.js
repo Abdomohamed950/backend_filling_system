@@ -3,7 +3,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 let { start_filling, stop_filling } = require("../utils/operator");
-const { getSnapshot, getAllSnapshots } = require("./mqtt");
+const { getSnapshot, getAllSnapshots, getPumpsState } = require("./mqtt");
 const portModel = require("../models/portsSettingModel");
 const History = require("../models/historyModel");
 const { resolveOperator, AUTH_REQUIRED } = require("../middleware/auth");
@@ -53,6 +53,10 @@ function socket_setup(mqttClient, server) {
     // الحالة الحالية فورًا، وإلا تبقى البطاقات فاضية حتى أول تغيير
     replay(socket, getAllSnapshots(), "snapshot");
     socket.emit("ai_mode_status", { running: aiModeRunning });
+    socket.emit("pumps_status", getPumpsState());
+    socket.on("get_pumps_status", () =>
+      socket.emit("pumps_status", getPumpsState()),
+    );
     devMode.registerSocket(socket);
 
     /*

@@ -45,6 +45,30 @@ const STATE_COMMANDS = ["start", "force_stop"];
 
 const NUMERIC_TOPICS = ["flowmeter", "flow_rate"];
 
+// Pump Broker topics (BACKEND_PUMPS_CONTRACT.md). Same "<a>/<b>" shape as a port
+// topic, so they must be matched by full name BEFORE the port handling.
+const PUMP_TOPICS = {
+  "bumpbroker/availability": "availability",
+  "pump1/running": "pump1",
+  "pump2/running": "pump2",
+};
+let pumpsState = { availability: "offline", pump1: null, pump2: null };
+const getPumpsState = () => ({ ...pumpsState });
+
+/*
+ * ports/status -> Pump Broker: عدد المنافذ اللي الـ valve بتاعها مش مقفولة.
+ * المقفول = "close"/"closed" أو آخر مرحلة قفل ("lastclosing"/"closing_final").
+ * أي قيمة تانية (open, opening, closing, closing_first/second…) = المنفذ مفتوح.
+ * منفذ offline لا يُحسب (القيمة retained ممكن تكون قديمة).
+ */
+const TOPIC_PORTS_STATUS = "ports/status";
+const VALVE_CLOSED = ["close", "closed", "lastclosing", "closing_final"];
+const PORTS_STATUS_DEBOUNCE_MS = 1000;
+const valveByPort = new Map();
+const offlinePorts = new Set();
+let lastPortsStatus = null;
+let portsStatusTimer = null;
+
 // مفردات الواجهة: close | open | opening | closing (backend.md §2.2)
 const VALVE_STATE_ALIASES = {
   closing_first: "closing",
@@ -255,7 +279,7 @@ function mqtt_setup() {
     console.log(`✅ Connected to MQTT broker (${MQTT_URL})`);
 
     // Only what the devices publish - "#" also fed our own commands back to us.
-    const filters = DEVICE_TOPICS.map((t) => `+/${t}`).concat("cam1/esp");
+    const filters = DEVICE_TOPICS.map((t) => `+/${t}`).concat("cam1/esp", Object.keys(PUMP_TOPICS));
     mqttClient.subscribe(filters, { qos: 1 }, (err) => {
       if (err) console.error("❌ MQTT subscribe failed:", err.message);
       else console.log("📡 Subscribed to:", filters.join(", "));
@@ -322,6 +346,36 @@ function applyConfigToDevice(port) {
 }
 
 function mqtt_messages(mqttClient, io) {
+  // Gateway lost the broker: the retained pump values may be stale
+  const markPumpsOffline = () => {
+    if (pumpsState.availability === "offline") return;
+    pumpsState = { ...pumpsState, availability: "offline" };
+    io.emit("pumps_status", getPumpsState());
+  };
+  mqttClient.on("offline", markPumpsOffline);
+  mqttClient.on("close", markPumpsOffline);
+
+  // الـ debounce: عند الاشتراك بتوصل retained كل المنافذ واحدة واحدة، فمنبعتش
+  // أرقام وسيطة (كانت هتوقف/تشغّل الطلمبات بالغلط). بنبعت بعد ما الحالة تستقر.
+  const schedulePortsStatus = () => {
+    clearTimeout(portsStatusTimer);
+    portsStatusTimer = setTimeout(() => {
+      let open = 0;
+      for (const [port, valve] of valveByPort) {
+        if (!offlinePorts.has(port) && !VALVE_CLOSED.includes(valve)) open++;
+      }
+      if (open === lastPortsStatus || !mqttClient.connected) return;
+      lastPortsStatus = open;
+      mqttClient.publish(TOPIC_PORTS_STATUS, String(open), { qos: 1, retain: true });
+      console.log(`🚰 ${TOPIC_PORTS_STATUS} -> ${open}`);
+    }, PORTS_STATUS_DEBOUNCE_MS);
+  };
+  // بعد reconnect نعيد النشر حتى لو الرقم ما اتغيرش
+  mqttClient.on("connect", () => {
+    lastPortsStatus = null;
+    if (valveByPort.size) schedulePortsStatus();
+  });
+
   mqttClient.on("message", async (topic, message, packet) => {
     const msg = message.toString();
 
@@ -332,6 +386,17 @@ function mqtt_messages(mqttClient, io) {
      * سجلات التعبئة الجارية). تُبثّ للواجهة كما هي، لكن جلسة التعبئة تتجاهلها.
      */
     const retained = Boolean(packet && packet.retain);
+
+    if (PUMP_TOPICS[topic]) {
+      if (msg.length === 0) return; // retained message being cleared
+      const field = PUMP_TOPICS[topic];
+      pumpsState = {
+        ...pumpsState,
+        [field]: field === "availability" ? msg.trim().toLowerCase() : Number(msg),
+      };
+      io.emit("pumps_status", getPumpsState());
+      return;
+    }
 
     if (topic === "cam1/esp") {
       io.emit("plate_capture", { data: msg });
@@ -384,6 +449,15 @@ function mqtt_messages(mqttClient, io) {
       payload.raw = msg;
     }
 
+    if (top === "valve_state") {
+      valveByPort.set(port, msg.trim().toLowerCase());
+      schedulePortsStatus();
+    } else if (top === "availability") {
+      if (msg === "offline") offlinePorts.add(port);
+      else offlinePorts.delete(port);
+      schedulePortsStatus();
+    }
+
     // السجلات ليست حالة — لا معنى لإعادة بثها لعميل جديد
     if (top !== "logdata" && top !== "debug") remember(port, top, payload);
 
@@ -404,4 +478,5 @@ module.exports = {
   applyConfigToDevice,
   getSnapshot,
   getAllSnapshots,
+  getPumpsState,
 };
