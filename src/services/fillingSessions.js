@@ -6,6 +6,8 @@
  *   2. الجهاز يقبل الكمية ويعلن <port>/state=filling → فتح سجل   (insert_1)
  *   3. الجهاز ينشر <port>/flowmeter بشكل متصل        → آخر قراءة عداد
  *   4. الجهاز يعلن <port>/state=stop | emergency_stop → إغلاق السجل (closeById)
+ *   (اختياري) <port>/state=paused ثم resumed: إيقاف مؤقت واستئناف لنفس السجل —
+ *   لا فتح ولا إغلاق، العدّاد يكمل من حيث توقف.
  *
  * لماذا الجهاز وليس الواجهة:
  *   - لو أغلق المتصفح أو انقطعت الشبكة بين المحطة والسيرفر، التعبئة تكمل
@@ -80,6 +82,8 @@ function portState(port) {
       settleDeadline: 0,
       settleReason: null,
       forceStopped: false,
+      paused: false,
+      secondClosed: false,
       lastLog: null,
       lastLogAt: 0,
       chain: Promise.resolve(),
@@ -202,9 +206,43 @@ function onFlowmeter(port, value) {
 
 /** <port>/state من الجهاز — الرسائل retained تُستثنى (انظر transport/mqtt.js) */
 function onState(port, state) {
+  if (state === "paused" || state === "resumed") return setPaused(port, state === "paused");
   if (state === "filling") return openRecord(port);
   if (END_STATES.includes(state)) return scheduleClose(port, state);
   return undefined; // "stoping" مرحلة عابرة
+}
+
+/*
+ * pause/resume لا يمسّان السجل. "resumed" اسم مستقل عن "filling" عمدًا: لو أعلن
+ * الجهاز filling عند الاستئناف لاعتبره openRecord تعبئة جديدة وأغلق هذا السجل
+ * كمهجور.
+ */
+function setPaused(port, paused) {
+  const s = portState(port);
+  if (!s.openId) return undefined; // لا تعبئة معروفة — لا شيء يُوقف
+  s.paused = paused;
+  console.log(`${paused ? "⏸️ " : "⏯️ "} ${port}: ${paused ? "إيقاف مؤقت" : "استئناف"} للسجل #${s.openId}`);
+  emit(paused ? "history_paused" : "history_resumed", { port, id: s.openId });
+  return undefined;
+}
+
+/*
+ * valve_state الخام من الجهاز: بعد بدء الإغلاق الثاني (أو النهائي) ما ينفعش pause.
+ * الجهاز نفسه بيرفض، لكن السيرفر لازم يعرف عشان يرد على الواجهة بسبب الرفض.
+ */
+function onValveState(port, raw) {
+  if (raw === "closing_second" || raw === "closing_final") {
+    portState(port).secondClosed = true;
+  }
+}
+
+/** هل مسموح بـ pause دلوقتي؟ { ok, reason? } */
+function canPause(port) {
+  const s = ports.get(port);
+  if (!s || !s.openId) return { ok: false, reason: "not_filling" };
+  if (s.paused) return { ok: false, reason: "already_paused" };
+  if (s.secondClosed || s.settleTimer) return { ok: false, reason: "closing_stage" };
+  return { ok: true };
 }
 
 function openRecord(port) {
@@ -230,6 +268,8 @@ function openRecord(port) {
       if (abandoned) emit("history_closed", { port, record: abandoned, reason: "abandoned" });
     }
 
+    s.paused = false;
+    s.secondClosed = false;
     s.forceStopped = false; // تعبئة جديدة: أي force_stop قديم ما يخصّهاش
     const meta = takeMeta(s, port) || {};
     const startMeter = meta.startMeter ?? s.lastMeter ?? null;
@@ -303,6 +343,7 @@ function closeRecord(port, reason) {
     const id = s.openId;
     if (!id) return;
     s.openId = null;
+    s.paused = false;
     const forceStopped = s.forceStopped;
 
     const endMeter = Number.isFinite(s.lastMeter) ? s.lastMeter : null;
@@ -435,6 +476,8 @@ function getSession(port) {
     lastMeter: s.lastMeter,
     pendingMeta: s.meta,
     closing: Boolean(s.settleTimer),
+    paused: s.paused,
+    canPause: canPause(port).ok,
   };
 }
 
@@ -449,6 +492,8 @@ module.exports = {
   noteForceStop,
   attachMeta,
   onFlowmeter,
+  onValveState,
+  canPause,
   onState,
   onLogData,
   onAvailability,

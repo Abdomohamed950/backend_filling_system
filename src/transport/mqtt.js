@@ -11,7 +11,7 @@ const MQTT_URL = process.env.MQTT_URL || "mqtt://localhost:1883";
  * Device -> server (retained status):
  *   <port>/flowmeter     float, 3 decimals
  *   <port>/flow_rate     float, 3 decimals
- *   <port>/state         filling | stoping | stop | emergency_stop
+ *   <port>/state         filling | paused | resumed | stoping | stop | emergency_stop
  *   <port>/valve_state   close | opening | open | closing_first | closing_second | closing_final
  *   <port>/availability  online | offline  (offline = broker Last Will)
  *   <port>/logdata       queued offline records (not retained)
@@ -22,7 +22,7 @@ const MQTT_URL = process.env.MQTT_URL || "mqtt://localhost:1883";
  * Server -> device (commands, NEVER retained - a retained command replays on
  * every device reconnect and would re-open the valve):
  *   <port>/quantity      required quantity, 0 < q < 100 (firmware rejects the rest)
- *   <port>/state         start | force_stop
+ *   <port>/state         start | pause | resume | force_stop
  *   <port>/conf          15 comma-separated fields, see buildConf()
  *   <port>/reset  <port>/refresh  <port>/send_logs  <port>/recapture
  */
@@ -41,7 +41,7 @@ const DEVICE_TOPICS = [
 
 // Payloads we send on <port>/state. The device publishes its own status on the
 // same topic, so we must drop our own echo instead of forwarding it to the UI.
-const STATE_COMMANDS = ["start", "force_stop"];
+const STATE_COMMANDS = ["start", "pause", "resume", "force_stop"];
 
 const NUMERIC_TOPICS = ["flowmeter", "flow_rate"];
 
@@ -337,7 +337,7 @@ function applyConfigToDevice(port) {
   const state = last.get("state")?.data;
 
   if (availability !== "online") return { sent: false, reason: "offline" };
-  if (state === "filling" || state === "stoping") return { sent: false, reason: "busy" };
+  if (state === "filling" || state === "paused" || state === "resumed" || state === "stoping") return { sent: false, reason: "busy" };
 
   // غير retained: reset retained كان هيعيد تشغيل الجهاز عند كل reconnect
   sharedClient.publish(`${port}/reset`, "1", { qos: 1, retain: false });
@@ -432,7 +432,7 @@ function mqtt_messages(mqttClient, io) {
       return;
     }
 
-    // Our own start/force_stop coming back on the shared <port>/state topic.
+    // Our own start/pause/resume/force_stop coming back on the shared <port>/state topic.
     if (top === "state" && STATE_COMMANDS.includes(msg)) return;
 
     const payload = { port, data: msg };
@@ -462,6 +462,7 @@ function mqtt_messages(mqttClient, io) {
     if (top !== "logdata" && top !== "debug") remember(port, top, payload);
 
     // بناء سجل التعبئة من رسائل الجهاز (services/fillingSessions.js)
+    if (top === "valve_state" && !retained) sessions.onValveState(port, msg.trim().toLowerCase());
     if (top === "flowmeter") sessions.onFlowmeter(port, payload.value);
     else if (top === "logdata") sessions.onLogData(port, msg);
     else if (top === "state" && !retained) sessions.onState(port, msg);

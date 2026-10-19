@@ -53,4 +53,32 @@ function stop_filling(mqttClient, data) {
   return true;
 }
 
-module.exports = { start_filling, stop_filling };
+function pause_filling(mqttClient, data) {
+  const port = data && data.port;
+  if (!port) {
+    console.warn("⚠️  pause_filling ignored: no port in payload");
+    return false;
+  }
+  const check = sessions.canPause(port);
+  if (!check.ok) {
+    console.warn(`⚠️  pause_filling rejected for ${port}: ${check.reason}`);
+    sessions.broadcast("pause_rejected", { port, reason: check.reason });
+    return false;
+  }
+  mqttClient.publish(`${port}/state`, "pause", COMMAND_OPTS);
+  console.log(`⏸️  ${port} pause`);
+  return true;
+}
+
+function resume_filling(mqttClient, data) {
+  const port = data && data.port;
+  if (!port) {
+    console.warn("⚠️  resume_filling ignored: no port in payload");
+    return false;
+  }
+  mqttClient.publish(`${port}/state`, "resume", COMMAND_OPTS);
+  console.log(`⏯️  ${port} resume`);
+  return true;
+}
+
+module.exports = { start_filling, stop_filling, pause_filling, resume_filling };

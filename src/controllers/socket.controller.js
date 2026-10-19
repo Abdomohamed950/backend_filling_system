@@ -1,5 +1,5 @@
 const { Server } = require("socket.io");
-let { start_filling, stop_filling } = require("../utils/operator");
+let { start_filling, stop_filling, pause_filling, resume_filling } = require("../utils/operator");
 const { spawn } = require("child_process");
 
 function socket_setup(mqttClient, server) {
@@ -21,6 +21,10 @@ function socket_setup(mqttClient, server) {
       socket.on("start_filling", (data) => start_filling(mqttClient, data));
 
       socket.on("stop_filling", (data) => stop_filling(mqttClient, data));
+
+      socket.on("pause_filling", (data) => pause_filling(mqttClient, data));
+
+      socket.on("resume_filling", (data) => resume_filling(mqttClient, data));
 
       let aiModeProcess = null;
       let aiModeRunning = false; // حالة مشتركة

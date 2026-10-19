@@ -70,7 +70,8 @@ enum FillingState {
   FILLING_CLOSING_SECOND,
   FILLING_CLOSING_FINAL,
   FILLING_COMPLETE,
-  FILLING_EMERGENCY_STOP
+  FILLING_EMERGENCY_STOP,
+  FILLING_PAUSED
 };
 
 ValveState currentValveState = VALVE_CLOSED;
@@ -82,6 +83,7 @@ bool firstCloseDone = false;
 bool secondCloseDone = false;
 bool thirdCloseDone = false;
 bool emergencyStopRequested = false;
+bool paused = false;  // pause من السيرفر: الصمام مقفول والكمية المتبقية محفوظة
 bool actionInProgress = false;
 const unsigned long MIN_ACTION_INTERVAL = 1000;
 unsigned long lastActionTime = 0;
@@ -206,6 +208,8 @@ String fillingStateToString(FillingState state) {
       return "complete";
     case FILLING_EMERGENCY_STOP:
       return "emergency_stop";
+    case FILLING_PAUSED:
+      return "paused";
     default:
       return "unknown";
   }
@@ -841,6 +845,7 @@ void callback(char *topic, byte *payload, unsigned int length) {
   else if (topicStr == String(truck_id) + "/state") {
     lastMqttState = message;
     if (message == "start") {
+      paused = false;
       is_running = true;
       firstCloseDone = false;
       secondCloseDone = false;
@@ -853,11 +858,44 @@ void callback(char *topic, byte *payload, unsigned int length) {
     }
 
 
+    else if (message == "pause") {
+      // يُقبل فقط أثناء تعبئة جارية قبل الإغلاق الثاني (بعده الكمية المتبقية صغيرة جدًا)
+      if (is_running && !paused && !secondCloseDone && !thirdCloseDone && currentFillingState == FILLING_RUNNING) {
+        paused = true;
+        updateFillingState(FILLING_PAUSED);
+        digitalWrite(PUMP_PIN, LOW);
+        RelayCloseDC(TIME_OPEN_DC + added_time, VALVE_CLOSING_FINAL);
+        if (valve_type == "bump")
+          digitalWrite(RELAY_OPEN, 0);
+        // لا نلمس flow_meter_prev_value ولا required_Quantity ولا أعلام الإغلاق
+        updatePortState("paused");
+      } else {
+        debugLog("MQTT_WARN", "pause ignored");
+      }
+    }
+
+    else if (message == "resume") {
+      if (is_running && paused) {
+        paused = false;
+        updateFillingState(FILLING_RUNNING);
+        RelayOpenDC();
+        if (valve_type == "bump")
+          digitalWrite(RELAY_OPEN, 1);
+        updateValveState(VALVE_OPEN);
+        // "resumed" لا "filling": السيرفر يفتح سجلًا جديدًا عند "filling"
+        updatePortState("resumed");
+      } else {
+        debugLog("MQTT_WARN", "resume ignored");
+      }
+    }
+
     else if (message == "force_stop") {
       thirdCloseDone = true;
       updatePortState("stoping");
       digitalWrite(PUMP_PIN, LOW);
-      RelayCloseDC(TIME_OPEN_DC + added_time, VALVE_CLOSING_FINAL);
+      if (!paused)  // الصمام مقفول أصلًا أثناء الـ pause
+        RelayCloseDC(TIME_OPEN_DC + added_time, VALVE_CLOSING_FINAL);
+      paused = false;
       if (valve_type == "bump")
         digitalWrite(RELAY_OPEN, 0);
       updatePortState("stop");
@@ -1224,6 +1262,7 @@ void startFunction() {
   secondCloseDone = false;
   thirdCloseDone = false;
   emergencyStopRequested = false;
+  paused = false;
 
   // إعداد التعبئة
   progressBar = 0;
@@ -1270,6 +1309,7 @@ void stopFunction() {
 
   debugLog("ACTION", "Stopping filling process");
 
+  paused = false;
   if (is_running) {
     is_running = false;
     isBold[1] = false;
@@ -1458,6 +1498,7 @@ void updateFlowFromPulses() {
 void forcestopinterupt() {
   if (is_running) {
     is_running = false;
+    paused = false;
     RelayCloseDC(TIME_OPEN_DC + added_time, VALVE_CLOSING_FINAL);
     if (valve_type == "bump")
       digitalWrite(RELAY_OPEN, 0);
@@ -1648,6 +1689,7 @@ void handleFillingEmergencyState() {
   digitalWrite(RELAY_CLOSE, LOW);
 
   is_running = false;
+  paused = false;
   emergencyStopRequested = false;
 
   debugLog("EMERGENCY", "System stopped!");
@@ -1723,6 +1765,9 @@ void modbus_loop() {
     case FILLING_EMERGENCY_STOP:
       handleFillingEmergencyState();
       break;
+
+    case FILLING_PAUSED:
+      break;  // الصمام مقفول؛ ننتظر resume أو force_stop
   }
 
   checkSystemTimeouts();
@@ -1749,7 +1794,7 @@ void pulse_loop() {
     if (!offline)
       pulse_calc();
 
-    if (is_running && !thirdCloseDone) {
+    if (is_running && !thirdCloseDone && !paused) {
 
       if (!offline) {
         if (previousValveState != "open") {
