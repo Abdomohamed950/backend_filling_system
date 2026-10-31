@@ -7,7 +7,7 @@
 // ===== Pins (adjust to your board) =====
 // One relay per pump (active-LOW): 0 = pump ON, 1 = pump OFF
 #define pump1Pin D1
-#define pump2Pin D5
+#define pump2Pin D2
 #define PUMP_ON HIGH
 #define PUMP_OFF LOW
 
