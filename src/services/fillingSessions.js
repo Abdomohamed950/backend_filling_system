@@ -221,6 +221,8 @@ function setPaused(port, paused) {
   const s = portState(port);
   if (!s.openId) return undefined; // لا تعبئة معروفة — لا شيء يُوقف
   s.paused = paused;
+  // الإيقاف المؤقت نفسه بيقفل الصمام (closing_final) — ده مش مرحلة إغلاق التعبئة
+  if (!paused) s.secondClosed = false;
   console.log(`${paused ? "⏸️ " : "⏯️ "} ${port}: ${paused ? "إيقاف مؤقت" : "استئناف"} للسجل #${s.openId}`);
   emit(paused ? "history_paused" : "history_resumed", { port, id: s.openId });
   return undefined;
@@ -231,8 +233,12 @@ function setPaused(port, paused) {
  * الجهاز نفسه بيرفض، لكن السيرفر لازم يعرف عشان يرد على الواجهة بسبب الرفض.
  */
 function onValveState(port, raw) {
+  const s = portState(port);
   if (raw === "closing_second" || raw === "closing_final") {
-    portState(port).secondClosed = true;
+    s.secondClosed = true;
+  } else if (raw === "open" || raw === "opening") {
+    // الصمام اتفتح تاني (استئناف أو تعبئة جديدة): الإغلاق السابق انتهى
+    s.secondClosed = false;
   }
 }
 
@@ -241,7 +247,10 @@ function canPause(port) {
   const s = ports.get(port);
   if (!s || !s.openId) return { ok: false, reason: "not_filling" };
   if (s.paused) return { ok: false, reason: "already_paused" };
-  if (s.secondClosed || s.settleTimer) return { ok: false, reason: "closing_stage" };
+  if (s.secondClosed || s.settleTimer) {
+    console.warn(`⚠️  canPause(${port}): secondClosed=${s.secondClosed} settleTimer=${Boolean(s.settleTimer)}`);
+    return { ok: false, reason: "closing_stage" };
+  }
   return { ok: true };
 }
 
