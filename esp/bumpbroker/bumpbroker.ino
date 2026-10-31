@@ -87,6 +87,12 @@ unsigned long highSince = 0;
 bool apMode = false;
 String apSsid = "";
 
+// ===== Reconnect timing (non-blocking) =====
+const unsigned long WIFI_RETRY_MS = 10000;
+const unsigned long MQTT_RETRY_MS = 5000;
+unsigned long lastWifiAttempt = 0;
+unsigned long lastMqttAttempt = 0;
+
 // ===== FS helpers =====
 String readFile(const char *path)
 {
@@ -115,7 +121,7 @@ void startAPFallback()
 {
   apMode = true;
   apSsid = "BumpBroker-Setup";
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);           // keep STA active so WiFi retries continue
   WiFi.softAP(apSsid.c_str());      // open network (no password)
   IPAddress myIP = WiFi.softAPIP(); // 192.168.4.1
   Serial.println();
@@ -229,14 +235,23 @@ void connectWiFi()
   }
   bool ok = (WiFi.status() == WL_CONNECTED);
   Serial.println(ok ? " OK" : " FAILED");
+  lastWifiAttempt = millis();
   if (!ok)
     startAPFallback();
+}
+
+// Single retry, called from loop() every WIFI_RETRY_MS while WiFi is down
+void retryWiFi()
+{
+  Serial.println("WiFi down, reconnecting...");
+  WiFi.disconnect();
+  WiFi.begin(ui_user.c_str(), ui_pass.c_str());
 }
 
 void connectToMQTT()
 {
   client.setServer(ui_mqtt.c_str(), 1883);
-  while (!client.connected() && WiFi.status() == WL_CONNECTED)
+  if (!client.connected() && WiFi.status() == WL_CONNECTED)
   {
     String cid = "bumpbroker-" + String(ESP.getChipId(), HEX);
     bool ok = client.connect(cid.c_str(), TOPIC_AVAIL, 1, true, "offline");
@@ -251,11 +266,11 @@ void connectToMQTT()
       client.publish(TOPIC_THR_HIGH_CUR, String(FLOW_HIGH_STOP, 3).c_str(), true);
       client.publish(TOPIC_PUMP2_ACTIVE_CUR, pump2Active ? "1" : "0", true);
       client.publish(TOPIC_PUMP1_RUNNING_CUR, pump1Running ? "1" : "0", true);
-      break;
     }
     else
     {
-      delay(1000);
+      Serial.print("MQTT connect failed, rc=");
+      Serial.println(client.state());
     }
   }
 }
@@ -376,14 +391,33 @@ void setup()
 
 void loop()
 {
-  if (!apMode)
+  if (WiFi.status() != WL_CONNECTED)
   {
-    if (WiFi.status() != WL_CONNECTED)
-      connectWiFi();
-    if (WiFi.status() == WL_CONNECTED)
+    if (millis() - lastWifiAttempt >= WIFI_RETRY_MS)
     {
-      if (!client.connected())
+      lastWifiAttempt = millis();
+      retryWiFi();
+    }
+  }
+  else
+  {
+    if (apMode)
+    {
+      // WiFi came back: shut the setup AP down
+      apMode = false;
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+    }
+    if (!client.connected())
+    {
+      if (millis() - lastMqttAttempt >= MQTT_RETRY_MS)
+      {
+        lastMqttAttempt = millis();
         connectToMQTT();
+      }
+    }
+    else
+    {
       client.loop();
     }
   }
