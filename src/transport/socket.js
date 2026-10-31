@@ -2,7 +2,7 @@ const { Server } = require("socket.io");
 const path = require("path");
 const { spawn } = require("child_process");
 
-let { start_filling, stop_filling } = require("../utils/operator");
+let { start_filling, stop_filling, pause_filling, resume_filling } = require("../utils/operator");
 const { getSnapshot, getAllSnapshots, getPumpsState } = require("./mqtt");
 const portModel = require("../models/portsSettingModel");
 const History = require("../models/historyModel");
@@ -194,6 +194,10 @@ function socket_setup(mqttClient, server) {
     });
 
     socket.on("stop_filling", (data) => stop_filling(mqttClient, data));
+
+    socket.on("pause_filling", (data) => pause_filling(mqttClient, data));
+
+    socket.on("resume_filling", (data) => resume_filling(mqttClient, data));
 
     // إغلاق كل المنافذ المعرّفة — شبكة أمان بعد stop_filling لكل منفذ
     socket.on("stop_all_ports", async () => {
